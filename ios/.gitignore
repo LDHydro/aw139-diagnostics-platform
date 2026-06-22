@@ -1,0 +1,16 @@
+# Xcode / SwiftPM build artifacts
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
+.swiftpm/
+Package.resolved
+
+# Transferred runtime assets (large; never commit)
+corpus.json
+*.safetensors
+models/
+
+# macOS
+.DS_Store
