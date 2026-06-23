@@ -9,6 +9,14 @@ struct SetupView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    Toggle("Demo mode (no models)", isOn: $models.demoMode)
+                } header: {
+                    Text("Smoke Test")
+                } footer: {
+                    Text("Runs the full UI + retrieval pipeline with no model files, using a built-in hashing embedder. Pair it with the synthetic demo corpus (tools/build_demo_corpus.py). Answers are not AI-generated in this mode.")
+                }
+
                 Section("Document Corpus") {
                     statusRow(title: "corpus.json",
                               ok: corpus.isLoaded,

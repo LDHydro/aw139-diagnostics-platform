@@ -27,6 +27,37 @@ GPU. The document corpus and model files are loaded by **manual file transfer**
 
 ---
 
+## Quick smoke test (no models, no internet)
+
+Before assembling the full corpus and downloading multi-GB models, you can
+verify the app, retrieval, and UI end-to-end with **zero model files**:
+
+1. Open & run the app on the iPad (or just build it).
+2. Open **Setup (⚙)** → turn on **Demo mode (no models)**.
+3. Transfer **`sample/demo-corpus.json`** onto the iPad as **`corpus.json`**
+   (Finder → iPad → Files → AW139 Diagnostics), then tap **Reload corpus**.
+4. Run a query, e.g. ATA 24 + *"generator voltage fluctuating"*, or
+   *"HEATER FAIL CAS message"*.
+
+In demo mode a built-in deterministic **hashing embedder** powers retrieval
+(no MLX, no download) and the answer is the retrieved documentation (no LLM).
+The synthetic corpus (`sample/demo-corpus.json`, 12 realistic AW139 snippets)
+is embedded by `tools/build_demo_corpus.py` using the *same* hashing algorithm
+as `HashingEmbedder.swift`, so cosine retrieval returns the right documents.
+Verified top matches:
+
+| Query | Top document |
+|-------|--------------|
+| generator voltage fluctuating | `39-A-24-32` Generator GCU |
+| HEATER FAIL CAS message | `39-A-30-42` Pitot heater |
+| altimeter shows 100 feet on ground | `39-A-31-41` Altimeter zero adjust |
+| landing gear will not retract | `39-A-32-10` Landing gear |
+
+> Demo mode is a plumbing/UI test only — it matches on shared keywords, not
+> meaning. Turn it off and load real MLX models for production retrieval.
+
+---
+
 ## What's in here
 
 ```
@@ -46,13 +77,17 @@ ios/
 │   │   ├── CorpusStore.swift          # loads corpus.json
 │   │   ├── VectorSearch.swift         # cosine top-k (Accelerate)
 │   │   ├── Inference.swift            # protocols + stub fallback
+│   │   ├── HashingEmbedder.swift      # no-model demo embedder
 │   │   ├── MLXGenerator.swift         # on-device LLM
 │   │   ├── MLXEmbedder.swift          # on-device embeddings
 │   │   ├── ModelManager.swift         # load state
 │   │   └── DiagnosticEngine.swift     # the pipeline
 │   ├── ViewModels/DiagnosticViewModel.swift
 │   └── Views/                         # Form, Result, Setup, ContentView
-├── tools/build_offline_corpus.py      # re-embed docs for offline use
+├── tools/
+│   ├── build_offline_corpus.py        # re-embed real docs for offline use
+│   └── build_demo_corpus.py           # generate the synthetic demo corpus
+├── sample/demo-corpus.json            # ready-to-transfer smoke-test corpus
 ├── project.yml                        # optional: regenerate project with XcodeGen
 └── README.md
 ```
