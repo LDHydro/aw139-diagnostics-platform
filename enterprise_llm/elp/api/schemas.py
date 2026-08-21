@@ -1,0 +1,301 @@
+"""Request and response models for the public API."""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, field_validator
+
+# ----------------------------------------------------------------------
+# Plain-language Q&A
+# ----------------------------------------------------------------------
+
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=2, max_length=8000)
+    # Narrow retrieval to particular documents or departments.
+    departments: list[str] = Field(default_factory=list)
+    doc_keys: list[str] = Field(default_factory=list)
+    include_superseded: bool = False
+    # Consult other internal AI systems. None = follow the platform default.
+    consult_peers: bool | None = None
+    peers: list[str] = Field(default_factory=list)
+    top_k: int | None = Field(default=None, ge=1, le=30)
+    conversation_id: str | None = None
+    # Identifies the calling in-house application, for audit and analytics.
+    app: str = ""
+
+    @field_validator("question")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+
+class Reference(BaseModel):
+    marker: str
+    type: Literal["document", "ai_system"]
+    citation: str
+    document_key: str | None = None
+    document_title: str | None = None
+    revision: str | None = None
+    department: str | None = None
+    section: str | None = None
+    section_path: str | None = None
+    heading: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    source_uri: str | None = None
+    score: float | None = None
+    chunk_id: str | None = None
+    system: str | None = None
+    display_name: str | None = None
+    model: str | None = None
+    queried_at: str | None = None
+    latency_ms: float | None = None
+    peer_references: list[dict] = Field(default_factory=list)
+
+
+class AskResponse(BaseModel):
+    answer: str
+    references: list[Reference] = Field(default_factory=list)
+    confidence: float
+    grounded: bool
+    passages_considered: int = 0
+    peers_consulted: list[str] = Field(default_factory=list)
+    conversation_id: str | None = None
+    model: str = ""
+    latency_ms: float = 0.0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=2000)
+    departments: list[str] = Field(default_factory=list)
+    doc_keys: list[str] = Field(default_factory=list)
+    top_k: int = Field(default=10, ge=1, le=50)
+    include_text: bool = True
+
+
+class SearchHit(BaseModel):
+    citation: str
+    document_key: str
+    document_title: str
+    revision: str
+    section: str
+    section_path: str
+    page_start: int | None
+    page_end: int | None
+    score: float
+    text: str = ""
+
+
+# ----------------------------------------------------------------------
+# Documents
+# ----------------------------------------------------------------------
+
+class DocumentSummary(BaseModel):
+    id: str
+    doc_key: str
+    title: str
+    department: str
+    doc_type: str
+    revision: str
+    effective_date: date | None
+    review_due_date: date | None
+    status: str
+    page_count: int
+    chunk_count: int
+    allowed_groups: list[str]
+    classification: str
+    updated_at: datetime | None = None
+
+
+class IngestMetadata(BaseModel):
+    doc_key: str = Field(..., min_length=1, max_length=128)
+    title: str = ""
+    department: str = ""
+    doc_type: str = "governing"
+    revision: str = ""
+    effective_date: date | None = None
+    review_due_date: date | None = None
+    allowed_groups: list[str] = Field(default_factory=list)
+    classification: str = "internal"
+    force: bool = False
+
+
+class IngestResponse(BaseModel):
+    document_id: str
+    doc_key: str
+    revision: str
+    chunk_count: int
+    page_count: int
+    skipped: bool = False
+    reason: str = ""
+
+
+# ----------------------------------------------------------------------
+# Maintenance
+# ----------------------------------------------------------------------
+
+class UtilizationEntry(BaseModel):
+    tail_number: str
+    day: date
+    flight_hours: float = Field(default=0.0, ge=0)
+    cycles: int = Field(default=0, ge=0)
+    landings: int = Field(default=0, ge=0)
+    source: str = "api"
+
+
+class ForecastResponse(BaseModel):
+    tail_number: str
+    model: str = ""
+    serial_number: str = ""
+    as_of: date
+    utilization: dict[str, Any]
+    forecasts: list[dict]
+    summary: dict[str, Any]
+
+
+class PlanRequest(BaseModel):
+    tail_numbers: list[str] = Field(default_factory=list)
+    horizon_days: int | None = Field(default=None, ge=1, le=1095)
+    # Persist the generated plan as schedule events.
+    commit: bool = False
+    explain: bool = False
+
+
+class CancelEventRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=1000)
+    reschedule: bool = True
+
+
+class DeferRequest(BaseModel):
+    tail_number: str
+    task_code: str
+    until: date
+    reason: str = Field(..., min_length=3, max_length=1000)
+    extension_flight_hours: float = Field(default=0.0, ge=0)
+    authority_reference: str = ""
+
+
+class CompleteEventRequest(BaseModel):
+    completed_on: date | None = None
+    work_order: str = ""
+    completed_task_codes: list[str] | None = None
+
+
+class RescheduleRequest(BaseModel):
+    new_start: date
+    reason: str = ""
+
+
+# ----------------------------------------------------------------------
+# LaTeX
+# ----------------------------------------------------------------------
+
+class LatexRequest(BaseModel):
+    brief: str = Field(default="", max_length=20000)
+    source: str = Field(default="", max_length=2_000_000)
+    template: str = ""
+    document_class: str = "article"
+    # Ground the document in the governing documents and cite them.
+    ground_in_documents: bool = False
+    departments: list[str] = Field(default_factory=list)
+    compile: bool = True
+
+    @field_validator("document_class")
+    @classmethod
+    def _safe_class(cls, v: str) -> str:
+        allowed = {"article", "report", "book", "letter", "memoir", "scrartcl"}
+        if v not in allowed:
+            raise ValueError(f"document_class must be one of: {', '.join(sorted(allowed))}")
+        return v
+
+
+class LatexResponse(BaseModel):
+    source: str
+    compiled: bool
+    artifact_id: str = ""
+    download_url: str = ""
+    page_count: int = 0
+    size_bytes: int = 0
+    errors: list[str] = Field(default_factory=list)
+    references: list[Reference] = Field(default_factory=list)
+
+
+# ----------------------------------------------------------------------
+# Development assistance
+# ----------------------------------------------------------------------
+
+class DevRequest(BaseModel):
+    instruction: str = Field(..., min_length=3, max_length=20000)
+    # Repo-relative paths to include as context.
+    files: list[str] = Field(default_factory=list)
+    workspace: str = ""
+    language: str = ""
+    mode: Literal["explain", "generate", "review", "patch", "test"] = "generate"
+
+
+class DevResponse(BaseModel):
+    output: str
+    files_included: list[str] = Field(default_factory=list)
+    truncated: list[str] = Field(default_factory=list)
+    model: str = ""
+    latency_ms: float = 0.0
+
+
+# ----------------------------------------------------------------------
+# Administration
+# ----------------------------------------------------------------------
+
+class ApiKeyRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=128)
+    description: str = ""
+    scopes: list[str] = Field(default_factory=list)
+    groups: list[str] = Field(default_factory=list)
+    owner_email: str = ""
+    expires_at: datetime | None = None
+    rate_limit_per_minute: int = Field(default=120, ge=1, le=10000)
+
+
+class ApiKeyResponse(BaseModel):
+    id: str
+    name: str
+    key_prefix: str
+    scopes: list[str]
+    groups: list[str]
+    active: bool
+    expires_at: datetime | None = None
+    # Present only in the creation response.
+    api_key: str | None = None
+
+
+class PeerRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=128)
+    base_url: str
+    protocol: Literal["openai", "anthropic", "rest"] = "openai"
+    display_name: str = ""
+    description: str = ""
+    model: str = ""
+    auth_type: Literal["none", "bearer", "api_key", "client_credentials"] = "none"
+    auth_header: str = "Authorization"
+    auth_env_var: str = ""
+    token_url: str = ""
+    scope: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    allowed_groups: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    citable: bool = True
+    timeout_s: float = Field(default=45.0, ge=1, le=300)
+    meta: dict = Field(default_factory=dict)
+
+
+class WhoAmIResponse(BaseModel):
+    subject: str
+    display_name: str
+    email: str
+    kind: str
+    groups: list[str]
+    roles: list[str]
+    scopes: list[str]
+    issuer: str = ""

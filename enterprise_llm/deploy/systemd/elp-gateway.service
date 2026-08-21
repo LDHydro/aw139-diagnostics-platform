@@ -1,0 +1,42 @@
+# The ELP API gateway: auth, RAG, federation, scheduling, LaTeX.
+[Unit]
+Description=ELP API gateway
+After=network-online.target elp-models.service postgresql.service
+Wants=network-online.target
+# The gateway starts and serves /health even when the models are still
+# loading, so this is Wants rather than Requires.
+Wants=elp-models.service
+
+[Service]
+Type=exec
+User=elp
+Group=elp
+WorkingDirectory=/opt/elp
+EnvironmentFile=/opt/elp/.env
+Environment=PATH=/opt/elp/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+ExecStart=/opt/elp/.venv/bin/uvicorn elp.main:app \
+    --host 0.0.0.0 --port 8080 \
+    --workers 4 \
+    --proxy-headers --forwarded-allow-ips='127.0.0.1' \
+    --timeout-keep-alive 75
+
+Restart=always
+RestartSec=5
+
+# Hardening. The gateway reads documents and writes LaTeX artifacts; it has
+# no business anywhere else on the filesystem.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/elp/artifacts /var/log/elp
+# Add each configured ELP_DEV__WORKSPACE_ROOTS path here as ReadOnlyPaths=
+# so code assistance can read repositories but never modify them.
+
+[Install]
+WantedBy=multi-user.target

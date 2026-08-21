@@ -1,0 +1,36 @@
+# vLLM model servers (chat + embeddings + reranker) on the RTX 5090.
+#
+#   sudo cp deploy/systemd/*.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now elp-models elp-gateway
+[Unit]
+Description=ELP model servers (vLLM on RTX 5090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=elp
+Group=elp
+WorkingDirectory=/opt/elp
+EnvironmentFile=/opt/elp/.env
+Environment=PATH=/opt/elp/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ELP_LOG_DIR=/var/log/elp
+# Hugging Face cache on fast local storage: weights are re-read on every
+# cold start and the external GPU link is already the slow part.
+Environment=HF_HOME=/opt/elp/.cache/huggingface
+
+ExecStart=/opt/elp/deploy/start_models.sh balanced
+ExecStop=/opt/elp/deploy/stop_models.sh
+
+# Loading a 32B model across an external GPU link takes minutes.
+TimeoutStartSec=1800
+TimeoutStopSec=180
+Restart=on-failure
+RestartSec=30
+
+# Never let the OOM killer take the model servers first.
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

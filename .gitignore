@@ -85,3 +85,12 @@ clean_export_v3/
 # Local connector data
 local_connector/*.db
 local_connector/*.sqlite
+
+# Enterprise LLM Platform
+.venv/
+.venv-elp/
+enterprise_llm/.venv/
+enterprise_llm/artifacts/
+enterprise_llm/logs/
+enterprise_llm/.cache/
+enterprise_llm/*.egg-info/

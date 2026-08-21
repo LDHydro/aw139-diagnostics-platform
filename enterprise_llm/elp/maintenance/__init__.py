@@ -1,0 +1,71 @@
+"""Predictive maintenance scheduling."""
+
+from .events import (
+    CancellationOutcome,
+    cancel_event,
+    complete_event,
+    confirm_event,
+    defer_task,
+    persist_plan,
+    release_deferral,
+    reschedule_event,
+)
+from .forecast import (
+    AircraftState,
+    Basis,
+    ComplianceState,
+    DeferralState,
+    DueForecast,
+    DueStatus,
+    TaskSpec,
+    UtilizationDay,
+    UtilizationRate,
+    estimate_utilization,
+    forecast_aircraft,
+    forecast_task,
+)
+from .planner import MaintenancePlanner, PlannedEvent, PlanResult, plan_fleet
+from .schedule_io import ImportResult, import_schedule
+from .service import (
+    MaintenanceError,
+    forecast_for_aircraft,
+    plan_for_aircraft,
+    plan_for_fleet,
+    record_compliance,
+    record_utilization,
+)
+
+__all__ = [
+    "AircraftState",
+    "Basis",
+    "CancellationOutcome",
+    "ComplianceState",
+    "DeferralState",
+    "DueForecast",
+    "DueStatus",
+    "ImportResult",
+    "MaintenanceError",
+    "MaintenancePlanner",
+    "PlanResult",
+    "PlannedEvent",
+    "TaskSpec",
+    "UtilizationDay",
+    "UtilizationRate",
+    "cancel_event",
+    "complete_event",
+    "confirm_event",
+    "defer_task",
+    "estimate_utilization",
+    "forecast_aircraft",
+    "forecast_for_aircraft",
+    "forecast_task",
+    "import_schedule",
+    "persist_plan",
+    "plan_fleet",
+    "plan_for_aircraft",
+    "plan_for_fleet",
+    "record_compliance",
+    "record_utilization",
+    "release_deferral",
+    "reschedule_event",
+]
