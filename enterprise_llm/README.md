@@ -18,6 +18,11 @@ It does six things:
 Access is governed by **Active Directory group membership** through your
 existing SSO, down to the individual document.
 
+> **New here?** Follow [`GUIDE.md`](GUIDE.md) instead — it walks you from an
+> empty machine to a working department system in order, with checkpoints at
+> each step, a troubleshooting table, and a roadmap of further use cases. This
+> README is the reference: what everything is and how it is configured.
+
 ---
 
 ## 1. What runs where
