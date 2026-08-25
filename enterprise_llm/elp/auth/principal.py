@@ -19,11 +19,13 @@ class Scope:
     LATEX = "latex"
     DEV = "dev"                       # code assistance
     FEDERATION = "federation:query"   # consult other internal AI systems
+    REPORTS = "reports"               # request and run reports
+    REPORTS_APPROVE = "reports:approve"  # approve a query for unattended runs
     ADMIN = "admin"
 
     ALL = (
         ASK, CHAT, DOCS_READ, DOCS_WRITE, MAINT_READ, MAINT_WRITE,
-        MAINT_APPROVE, LATEX, DEV, FEDERATION, ADMIN,
+        MAINT_APPROVE, LATEX, DEV, FEDERATION, REPORTS, REPORTS_APPROVE, ADMIN,
     )
 
 
@@ -33,21 +35,22 @@ ROLE_SCOPES: dict[str, tuple[str, ...]] = {
     "engineer": (
         Scope.ASK, Scope.CHAT, Scope.DOCS_READ, Scope.DOCS_WRITE,
         Scope.MAINT_READ, Scope.MAINT_WRITE, Scope.LATEX, Scope.DEV,
-        Scope.FEDERATION,
+        Scope.FEDERATION, Scope.REPORTS, Scope.REPORTS_APPROVE,
     ),
     "planner": (
         Scope.ASK, Scope.CHAT, Scope.DOCS_READ, Scope.MAINT_READ,
-        Scope.MAINT_WRITE, Scope.LATEX, Scope.FEDERATION,
+        Scope.MAINT_WRITE, Scope.LATEX, Scope.FEDERATION, Scope.REPORTS,
     ),
     "maintenance_manager": (
         Scope.ASK, Scope.CHAT, Scope.DOCS_READ, Scope.MAINT_READ,
         Scope.MAINT_WRITE, Scope.MAINT_APPROVE, Scope.LATEX, Scope.FEDERATION,
+        Scope.REPORTS, Scope.REPORTS_APPROVE,
     ),
     "developer": (
         Scope.ASK, Scope.CHAT, Scope.DOCS_READ, Scope.DEV, Scope.LATEX,
         Scope.FEDERATION,
     ),
-    "reader": (Scope.ASK, Scope.CHAT, Scope.DOCS_READ, Scope.MAINT_READ),
+    "reader": (Scope.ASK, Scope.CHAT, Scope.DOCS_READ, Scope.MAINT_READ, Scope.REPORTS),
     "service": (Scope.ASK, Scope.CHAT, Scope.DOCS_READ),
 }
 

@@ -12,6 +12,7 @@ It does six things:
 | Consults your **other internal LLM/AI systems** and attributes what they say | same call, `[A#]` references |
 | **Predictive maintenance scheduling** from your standard maintenance programme | `/v1/maintenance/*` |
 | **MEL dispatch decision support** — may we dispatch, under what conditions, until when | `/v1/mel/*` |
+| **Plain-language operational reports** from NAMIS, saved and scheduled | `/v1/reports/*` |
 | **LaTeX** authoring and PDF compilation | `POST /v1/latex` |
 | **Application development** assistance over your own repositories | `POST /v1/dev` |
 | A drop-in **OpenAI-compatible API** so existing in-house apps integrate unchanged | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` |
@@ -400,6 +401,77 @@ dispatched.
 > Index the MEL itself as a document with `doc_type: mel` as well as importing
 > the catalogue. The catalogue drives the decisions; the indexed document lets
 > `/v1/mel/check` resolve a free-text description to candidate items.
+
+---
+
+## 5b. Operational reports from NAMIS
+
+Operations asks in plain language; the platform authors a read-only query
+against NAMIS, runs it, narrates the result and renders the deliverable.
+
+```bash
+# Ad-hoc: draft, run and return in one call.
+curl -X POST http://elp:8080/v1/reports/ask \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"request_text":"every work order still open after 14 days, by tail number and station",
+       "output_formats":["markdown","csv"]}'
+```
+
+To save and schedule it, the workflow is deliberately two-step:
+
+```
+draft  →  review  →  save  →  approve  →  schedule
+```
+
+```bash
+curl -X POST .../v1/reports/draft -d '{"request_text":"..."}'     # returns SQL + assumptions
+curl -X POST .../v1/reports       -d '{"name":"Ageing work orders", "query":"<reviewed SQL>", ...}'
+curl -X POST .../v1/reports/ageing-work-orders/approve             # needs reports:approve
+curl -X PUT  .../v1/reports/ageing-work-orders/schedule \
+     -d '{"cron":"0 6 * * 1-5","timezone":"America/Sao_Paulo"}'
+```
+
+**Why approval exists.** An ad-hoc run happens with a person watching, so an
+unapproved query is fine there. A scheduled run happens at 03:00 with nobody
+watching, so it is not. The query is generated **once**, at draft time, and
+stored; scheduled runs re-execute the approved text rather than re-generating
+it, because a report that silently changes shape between runs is worse than no
+report — the numbers would move for reasons nobody could trace.
+
+Approval binds to a fingerprint of the query. Edit the query and the
+fingerprint stops matching: the report drops back to draft and the schedule
+stops firing until someone approves it again. That is what stops "just a small
+tweak" from putting an unreviewed query on a nightly timer.
+
+**Query safety is layered**, because any single layer can be defeated:
+
+1. **The NAMIS account is read-only.** This is the layer that actually holds.
+   Provision it correctly; everything below catches mistakes before they reach
+   it.
+2. **The transaction is opened READ ONLY** with a statement timeout.
+3. **The statement is validated** — single statement, SELECT/WITH only, no
+   DDL, DML, `SELECT … INTO`, system catalogues, or file/network functions,
+   and every table checked against an allowlist.
+4. **A LIMIT is enforced** when the query omits one.
+
+The validator works on a comment-stripped, literal-masked copy, so keywords
+hidden in comments or strings cannot smuggle anything past it — and a
+legitimate `WHERE status = 'deleted'` is not rejected either.
+
+Columns matching `ELP_REPORTS__REDACTED_COLUMNS` never leave the database.
+Results render to Markdown, CSV, HTML, JSON and PDF (through the same LaTeX
+service and sandbox as everything else here).
+
+Scheduled execution runs from the `elp-reports` timer, which checks every ten
+minutes; each report fires on its own cron expression in its own timezone.
+Reports run one after another, never concurrently — a burst of simultaneous
+queries at 03:00 is how a reporting job becomes an outage.
+
+> **What you need to supply:** the NAMIS connection details, a read-only
+> account, and the table allowlist. The platform does not assume a NAMIS
+> schema — it introspects the tables that account can see and grounds query
+> authoring in the real column names, which is what stops the model inventing
+> plausible-looking fields.
 
 ---
 

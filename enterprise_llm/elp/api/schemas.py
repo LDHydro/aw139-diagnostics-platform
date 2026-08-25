@@ -377,3 +377,101 @@ class MelClearRequest(BaseModel):
 class MelExtendRequest(BaseModel):
     reason: str = Field(..., min_length=3, max_length=1000)
     authority_reference: str = ""
+
+
+# ----------------------------------------------------------------------
+# Operational reports
+# ----------------------------------------------------------------------
+
+class ReportDraftRequest(BaseModel):
+    request_text: str = Field(..., min_length=5, max_length=4000)
+
+
+class ReportDraftResponse(BaseModel):
+    request_text: str
+    query: str
+    explanation: str = ""
+    assumptions: list[str] = Field(default_factory=list)
+    tables: list[str] = Field(default_factory=list)
+    valid: bool = False
+    rejection: str = ""
+    repaired: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ReportAskRequest(BaseModel):
+    """One-shot ad-hoc report: draft, run and return, without saving."""
+
+    request_text: str = Field(..., min_length=5, max_length=4000)
+    output_formats: list[str] = Field(default_factory=lambda: ["markdown"])
+    narrative: bool = True
+
+
+class ReportCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=200)
+    request_text: str = Field(..., min_length=5, max_length=4000)
+    query: str = Field(..., min_length=5)
+    description: str = ""
+    source: str = "namis"
+    query_language: Literal["sql", "rest"] = "sql"
+    parameters: dict = Field(default_factory=dict)
+    output_formats: list[str] = Field(default_factory=lambda: ["markdown", "csv"])
+    narrative: bool = True
+    # AD groups permitted to run this report and read its results.
+    allowed_groups: list[str] = Field(default_factory=list)
+
+
+class ReportUpdateRequest(BaseModel):
+    description: str | None = None
+    request_text: str | None = None
+    query: str | None = None
+    parameters: dict | None = None
+    output_formats: list[str] | None = None
+    narrative: bool | None = None
+    allowed_groups: list[str] | None = None
+
+
+class ReportScheduleRequest(BaseModel):
+    # Five-field cron, or an @alias such as @daily.
+    cron: str = Field(..., min_length=1, max_length=128)
+    timezone: str = "UTC"
+    enabled: bool = True
+
+
+class ReportSummary(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    request_text: str
+    status: str
+    query_language: str = "sql"
+    output_formats: list[str] = Field(default_factory=list)
+    narrative: bool = True
+    allowed_groups: list[str] = Field(default_factory=list)
+    owner: str = ""
+    approved_by: str = ""
+    approved_at: datetime | None = None
+    approval_current: bool = False
+    schedule_cron: str = ""
+    schedule_timezone: str = "UTC"
+    schedule_enabled: bool = False
+    schedule_description: str = ""
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+
+
+class ReportRunSummary(BaseModel):
+    id: str
+    definition_id: str
+    status: str
+    trigger: str
+    actor: str = ""
+    started_at: datetime
+    finished_at: datetime | None = None
+    row_count: int = 0
+    truncated: bool = False
+    duration_ms: float = 0.0
+    narrative: str = ""
+    artifacts: list[dict] = Field(default_factory=list)
+    error: str = ""
+    warnings: list = Field(default_factory=list)

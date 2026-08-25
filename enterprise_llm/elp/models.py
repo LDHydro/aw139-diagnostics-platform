@@ -771,3 +771,130 @@ class MelDeferral(Base, TimestampMixin):
         Index("ix_mel_deferrals_aircraft_status", "aircraft_id", "status"),
         Index("ix_mel_deferrals_expires", "expires_on"),
     )
+
+
+# ======================================================================
+# Operational reporting
+# ======================================================================
+
+class ReportStatus(str, enum.Enum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+    DISABLED = "disabled"
+
+
+class RunStatus(str, enum.Enum):
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    # Refused before execution: the query no longer passes validation, or
+    # its approval was invalidated by an edit.
+    BLOCKED = "blocked"
+
+
+class ReportDefinition(Base, TimestampMixin):
+    """
+    A saved report: a plain-language request, the query approved to answer
+    it, and optionally a schedule.
+
+    The approved query is stored and re-executed verbatim. Scheduled runs
+    never re-generate it from the request text, because a report that
+    silently changes shape between runs is worse than no report - the
+    numbers would move for reasons nobody could trace.
+    """
+
+    __tablename__ = "report_definitions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # What operations actually asked for, in their words.
+    request_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # namis | internal
+    source: Mapped[str] = mapped_column(String(32), default="namis", nullable=False)
+    query_language: Mapped[str] = mapped_column(String(16), default="sql", nullable=False)
+    query: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Named parameters with defaults, e.g. {"days_back": 30}.
+    parameters: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+    output_formats: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=lambda: ["markdown", "csv"], nullable=False
+    )
+    # Have the local model write a plain-language summary of the results.
+    narrative: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    status: Mapped[str] = mapped_column(
+        String(16), default=ReportStatus.DRAFT.value, nullable=False
+    )
+    # Fingerprint of the query at approval. If the query is edited the hash
+    # stops matching and the report drops back to draft.
+    approved_query_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    approved_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    schedule_cron: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    schedule_timezone: Mapped[str] = mapped_column(String(64), default="UTC", nullable=False)
+    schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # AD groups permitted to run this report and read its results. Empty
+    # means any caller holding the reports scope.
+    allowed_groups: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, nullable=False
+    )
+    owner: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+    runs: Mapped[list[ReportRun]] = relationship(
+        back_populates="definition", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_report_definitions_status", "status"),
+        Index("ix_report_definitions_schedule", "schedule_enabled", "next_run_at"),
+    )
+
+
+class ReportRun(Base):
+    """One execution of a report definition."""
+
+    __tablename__ = "report_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    definition_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("report_definitions.id", ondelete="CASCADE"), nullable=False
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(
+        String(16), default=RunStatus.RUNNING.value, nullable=False
+    )
+    # manual | scheduled
+    trigger: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+
+    # The exact statement executed, including any injected LIMIT.
+    query_executed: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    parameters_used: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+
+    narrative: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # [{"format": "csv", "path": "...", "bytes": 1234}]
+    artifacts: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    warnings: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+    definition: Mapped[ReportDefinition] = relationship(back_populates="runs")
+
+    __table_args__ = (
+        Index("ix_report_runs_definition_started", "definition_id", "started_at"),
+        Index("ix_report_runs_status", "status"),
+    )

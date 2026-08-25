@@ -386,6 +386,99 @@ or if the conditions have not been confirmed. If a backfill is rejected, that
 is worth investigating rather than working around — it means what is on the
 aircraft does not match what the MEL allows.
 
+### 4.7 Connect NAMIS and commission reporting
+
+**Before anything else, get a read-only NAMIS account.** Every other control
+in the reporting path is there to catch mistakes before they reach the
+database; this is the one that actually holds. Ask your DBA for an account
+with `SELECT` and nothing else, scoped to the tables operations needs.
+
+```bash
+# /etc/elp/namis.env  — root-owned, chmod 600, NOT in .env
+NAMIS_PASSWORD=<the read-only account password>
+```
+
+```bash
+# .env
+ELP_REPORTS__NAMIS_KIND=sql
+ELP_REPORTS__NAMIS_DSN=postgresql+asyncpg://namis_readonly:${PASSWORD}@namis.corp.internal:5432/namis
+ELP_REPORTS__ALLOWED_SCHEMAS=["namis"]
+ELP_REPORTS__ALLOWED_TABLES=[]        # tighten once you know what is used
+```
+
+**Checkpoint** — confirm the platform can see the schema:
+
+```bash
+curl -s .../v1/reports/schema -H "X-API-Key: $KEY" | python -m json.tool | head -40
+```
+
+You should get real tables and real column names. This introspection is what
+grounds query authoring; without it the model invents plausible-looking
+columns, which is the single largest source of wrong-looking reports.
+
+Then prove the whole path with a throwaway request:
+
+```bash
+curl -X POST .../v1/reports/ask -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"request_text":"count of work orders opened in the last 7 days"}'
+```
+
+Check three things in the response:
+
+- **`query`** — read it. Does it use the columns you would have used?
+- **`assumptions`** — this is where the model says what it had to guess.
+  Usually the difference between the report you wanted and the one you asked
+  for.
+- **`run.row_count`** — does the number match what someone in operations
+  would expect? If it does not, the query is wrong, not the database.
+
+### 4.8 Save and schedule the first real report
+
+```
+draft  →  review  →  save  →  approve  →  schedule
+```
+
+Do not shortcut this. An ad-hoc run happens with a person watching; a
+scheduled run happens at 03:00 with nobody watching, and the approval step is
+the only thing standing between those two situations.
+
+```bash
+# 1. Draft — nothing is saved or run
+curl -X POST .../v1/reports/draft -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"request_text":"work orders still open after 14 days, by tail and station"}'
+
+# 2. Save the REVIEWED query (edit it first if the draft was not quite right)
+curl -X POST .../v1/reports -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Ageing work orders",
+       "request_text":"work orders still open after 14 days, by tail and station",
+       "query":"<the SQL you reviewed>",
+       "output_formats":["markdown","csv","pdf"],
+       "allowed_groups":["AW139-Planning","AW139-Maint-Admins"]}'
+
+# 3. Approve — requires reports:approve, and means "I have read this query"
+curl -X POST ".../v1/reports/Ageing%20work%20orders/approve" -H "X-API-Key: $APPROVER_KEY"
+
+# 4. Schedule
+curl -X PUT ".../v1/reports/Ageing%20work%20orders/schedule" -H "X-API-Key: $APPROVER_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"cron":"0 6 * * 1-5","timezone":"America/Sao_Paulo","enabled":true}'
+```
+
+Then enable the timer and verify what it thinks is due:
+
+```bash
+sudo systemctl enable --now elp-reports.timer
+python scripts/run_scheduled_reports.py --dry-run
+curl -s .../v1/reports/status/scheduled -H "X-API-Key: $KEY" | python -m json.tool
+```
+
+**Set `allowed_groups` on every saved report.** Report output is frequently
+more sensitive than the underlying records — a table of everything overdue,
+by station, is exactly the summary you would not want circulating freely.
+
 ---
 
 ## 5. Day 4 — connect people and applications
@@ -520,6 +613,14 @@ artifacts are disposable.
 | `deferral cannot be recorded` on backfill | The MEL does not permit what is on the aircraft | Investigate rather than work around; the aircraft may be carrying invalid relief |
 | Category A item has no expiry | Interval stated in flight hours or cycles, not days | Enter the day limit manually; the platform will not convert |
 | Extension refused | Category A, already extended, or already expired | All three are correct refusals — an extension is granted before the limit, not after |
+| `NAMIS is not configured` | `ELP_REPORTS__NAMIS_KIND` still `disabled` | Set it to `sql` or `rest` and supply the DSN |
+| `/v1/reports/schema` returns no tables | The account cannot see them, or the allowlist excludes them | Check the account's grants first, then `ELP_REPORTS__ALLOWED_TABLES` |
+| Draft query rejected as unsafe | Working as intended — read the rejection | It names the exact construct; rephrase the request or widen the allowlist |
+| Report numbers look wrong | Almost always the query, not the database | Read `assumptions` on the draft; re-draft with the ambiguity spelled out |
+| Scheduled report stopped firing | Someone edited the query, revoking approval | `GET /v1/reports/{name}` → `approval_current: false`. Re-approve |
+| Run status `blocked` | Same cause: query no longer matches its approval | Re-approve after reviewing the change |
+| Report ran but the PDF is missing | LaTeX failed; other formats still wrote | Check `warnings` on the run — the CSV and Markdown are unaffected |
+| Scheduled run late by minutes | The timer checks every 10 minutes | Expected. Missed runs are picked up within a 90-minute grace window |
 
 ---
 
@@ -567,6 +668,12 @@ The planner knows every task due in the next 120 days and each task's
 `required_parts`. Project that into parts demand, compare against stock via
 `smart-stock.ts`, and flag long-lead items before they become AOG. Turns a
 reactive stock function into a forward-looking one.
+
+**8.4b Operational reporting from NAMIS — DELIVERED 2026-08-25**
+
+Plain-language report requests, answered by a guarded read-only query against
+NAMIS, saved and schedulable. See §4.7-4.8 to commission it and README §5b
+for the API and the safety model.
 
 ### Tier 2 — modest new build
 
@@ -646,6 +753,32 @@ remembering, or change how the platform is used. Newest at the top.
 **Why:**
 **Watch out for:**
 -->
+
+### 2026-08-25 — NAMIS operational reporting added
+
+**Who:** initial build
+**What changed:** New `elp/reports/` package and twelve `/v1/reports/*`
+endpoints. Operations requests a report in plain language; the platform
+authors a read-only query against NAMIS grounded in the introspected schema,
+runs it, narrates the result and renders Markdown/CSV/HTML/JSON/PDF. Reports
+can be saved, approved and scheduled; the `elp-reports` timer runs them. 98
+new tests.
+**Why:** Replaces a manual extract-and-format cycle, and puts the recurring
+reports on a timer instead of a person's calendar reminder.
+**Watch out for:**
+- **The read-only NAMIS account is the control that matters.** The SQL guard,
+  the read-only transaction and the statement timeout are defence in depth.
+  Do not treat them as a substitute for provisioning the account correctly.
+- Approval binds to a fingerprint of the query text. Editing a scheduled
+  report's query revokes approval and stops the schedule — by design. If a
+  report "stopped arriving", check `approval_current` first.
+- Scheduled runs re-execute the **approved** query and never re-generate it.
+  A report whose shape changed between runs would be untraceable.
+- Set `allowed_groups` on every saved report. Report output is often more
+  sensitive than the records behind it.
+- `ELP_REPORTS__ALLOWED_TABLES` is empty by default, which permits any table
+  the account can see. Tighten it once you know which tables operations
+  actually uses.
 
 ### 2026-08-25 — MEL dispatch decision support added
 

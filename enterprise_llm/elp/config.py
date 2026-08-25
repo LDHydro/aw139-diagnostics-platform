@@ -176,6 +176,54 @@ class LatexSettings(BaseModel):
     template_dir: str = str(BASE_DIR / "elp" / "latex" / "templates")
 
 
+class ReportSettings(BaseModel):
+    """
+    Operational reporting against NAMIS.
+
+    Every limit here exists because a generated query runs unattended on a
+    schedule: the blast radius of a bad one is not one slow page, it is a
+    production database at 03:00 with nobody watching.
+    """
+
+    enabled: bool = True
+
+    # --- NAMIS connection -------------------------------------------
+    # "sql" for a direct read-only database connection, "rest" for an API.
+    namis_kind: Literal["sql", "rest", "disabled"] = "disabled"
+    # SQLAlchemy URL. MUST point at a READ-ONLY database account.
+    namis_dsn: str = ""
+    namis_rest_base_url: str = ""
+    # Name of the environment variable holding the credential, never the
+    # credential itself.
+    namis_auth_env_var: str = "NAMIS_PASSWORD"
+    namis_auth_header: str = "Authorization"
+    namis_auth_type: Literal["none", "bearer", "api_key"] = "bearer"
+
+    # --- Query safety ------------------------------------------------
+    # Schemas and tables the reporting account may read. Empty means "any
+    # table the database account can see", which is only acceptable when
+    # that account is itself tightly scoped.
+    allowed_schemas: list[str] = Field(default_factory=list)
+    allowed_tables: list[str] = Field(default_factory=list)
+    # Columns never returned, matched case-insensitively on the column name.
+    redacted_columns: list[str] = Field(
+        default_factory=lambda: ["password", "passwd", "secret", "token", "ssn", "cpf"]
+    )
+    max_rows: int = 5000
+    statement_timeout_ms: int = 30000
+    # Rows handed to the model when it narrates the result. The full set
+    # still reaches the report; only the narration sample is capped.
+    narration_row_sample: int = 50
+    max_cell_chars: int = 500
+
+    # --- Scheduling ---------------------------------------------------
+    # A generated query may not run unattended until a person approves it.
+    require_approval_for_schedule: bool = True
+    max_concurrent_runs: int = 2
+    run_retention_days: int = 365
+    artifact_dir: str = str(BASE_DIR / "artifacts" / "reports")
+
+
 class DevSettings(BaseModel):
     """Code-assist / application development."""
 
@@ -221,6 +269,7 @@ class Settings(BaseSettings):
     federation: FederationSettings = Field(default_factory=FederationSettings)
     maintenance: MaintenanceSettings = Field(default_factory=MaintenanceSettings)
     latex: LatexSettings = Field(default_factory=LatexSettings)
+    reports: ReportSettings = Field(default_factory=ReportSettings)
     dev: DevSettings = Field(default_factory=DevSettings)
 
     @field_validator("cors_origins", mode="before")

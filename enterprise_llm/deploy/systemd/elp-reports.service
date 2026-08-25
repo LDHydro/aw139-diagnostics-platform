@@ -1,0 +1,19 @@
+[Unit]
+Description=ELP scheduled operational reports
+After=elp-gateway.service
+
+[Service]
+Type=oneshot
+User=elp
+Group=elp
+WorkingDirectory=/opt/elp
+EnvironmentFile=/opt/elp/.env
+# The NAMIS credential lives here, not in .env, so it is readable only by
+# root and the elp user:
+#   /etc/elp/namis.env  (chmod 600, containing NAMIS_PASSWORD=...)
+EnvironmentFile=-/etc/elp/namis.env
+Environment=PATH=/opt/elp/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/elp/.venv/bin/python scripts/run_scheduled_reports.py --prune
+
+# Reports query a production system; never let one pile up on the last.
+TimeoutStartSec=1800
