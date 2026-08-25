@@ -771,6 +771,41 @@ remembering, or change how the platform is used. Newest at the top.
 **Watch out for:**
 -->
 
+### 2026-08-25 — Open item: port the existing report builder
+
+**Who:** noted from operations
+**Status:** OPEN — waiting on a port from another Claude Code session that is
+not reachable from here.
+
+**What is known:** NAMIS is a database, so the SQL adapter
+(`ELP_REPORTS__NAMIS_KIND=sql`) is the correct path and the REST adapter can
+be ignored. An existing report builder lives in a separate session and will
+be brought over on a laptop.
+
+**Where it plugs in.** The reporting pipeline has four seams, and the
+existing builder probably replaces one or two of them rather than all four:
+
+| Seam | Module | Replace if the existing builder... |
+|---|---|---|
+| Query authoring | `elp/reports/authoring.py` | already has prompts or query templates that work against NAMIS |
+| Query execution | `elp/reports/datasource.py` | **do not replace** — the read-only guarantees live here |
+| Rendering | `elp/reports/render.py` | has its own layouts, templates or house style |
+| Saving + scheduling | `elp/reports/service.py`, `runner.py` | has its own definition format worth keeping |
+
+**Worth bringing over with it, to reconcile quickly:**
+- Any existing NAMIS table/column knowledge or query templates — this is the
+  most valuable part and the hardest to reconstruct.
+- Its report definition format, if it has one, so saved reports can be
+  migrated rather than re-authored.
+- Any house style for report layout.
+- Whether it assumed a writable connection anywhere. If so, that needs
+  unpicking before it runs here: this platform's NAMIS path is read-only by
+  four layers and a test asserts no `commit()` exists in it.
+
+**Do not port over:** anything that writes to NAMIS, and any embedded
+credentials — connection secrets belong in `/etc/elp/namis.env`, referenced
+by name only.
+
 ### 2026-08-25 — NAMIS operational reporting added
 
 **Who:** initial build
