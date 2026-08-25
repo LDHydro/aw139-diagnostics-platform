@@ -583,3 +583,191 @@ class Deferral(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_deferrals_aircraft_task", "aircraft_id", "task_id"),
     )
+
+
+# ======================================================================
+# Minimum Equipment List / Configuration Deviation List
+# ======================================================================
+
+class MelCategory(str, enum.Enum):
+    """
+    Rectification interval categories.
+
+    B, C and D carry fixed intervals; A means "as stated in the remarks
+    column of the MEL itself", which varies item by item.
+    """
+
+    A = "A"
+    B = "B"      # 3 consecutive calendar days
+    C = "C"      # 10 consecutive calendar days
+    D = "D"      # 120 consecutive calendar days
+    # Configuration Deviation List items: missing secondary airframe parts.
+    CDL = "CDL"
+
+
+class DeferralStatus(str, enum.Enum):
+    OPEN = "open"
+    CLEARED = "cleared"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+class MelItem(Base, TimestampMixin):
+    """
+    One entry from the operator's approved Minimum Equipment List.
+
+    The MEL is what makes an aircraft dispatchable with something
+    inoperative.  Anything not listed here must work - that is the whole
+    premise of the document, and the dispatch engine enforces it.
+    """
+
+    __tablename__ = "mel_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # ATA-style reference as printed in the MEL, e.g. "24-11-01".
+    item_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    ata_chapter: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    system: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    category: Mapped[str] = mapped_column(String(8), nullable=False)
+    # Category A items carry their interval in the remarks; this is the
+    # number of days parsed from (or entered against) that text.
+    category_a_days: Mapped[int | None] = mapped_column(Integer)
+
+    # "2 installed, 1 required for dispatch" => one may be deferred.
+    number_installed: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    number_required: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Conditions from the MEL's remarks column.
+    remarks: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # (o) operational and (m) maintenance procedures that must be applied.
+    operational_procedure: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    maintenance_procedure: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Performance or operational penalty, common on CDL items.
+    placard_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    performance_penalty: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    # Item numbers that may not be inoperative at the same time as this one.
+    incompatible_with: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, nullable=False
+    )
+    # Operations this item forbids, e.g. "IFR", "night", "over water".
+    prohibited_operations: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, nullable=False
+    )
+
+    # Applicability, mirroring MaintenanceTask.
+    applicable_models: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, nullable=False
+    )
+    applicable_configurations: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, nullable=False
+    )
+    applicable_serials: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, nullable=False
+    )
+
+    # Whether the authority permits a one-time extension of the interval.
+    extension_permitted: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+
+    # Traceability to the approved document and its revision.
+    source_document_key: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    source_revision: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    source_reference: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("item_number", "source_revision", name="uq_mel_item_revision"),
+        Index("ix_mel_items_number", "item_number"),
+        Index("ix_mel_items_ata", "ata_chapter"),
+    )
+
+    def applies_to(self, aircraft: Aircraft) -> bool:
+        if not self.active:
+            return False
+        if self.applicable_models and aircraft.model not in self.applicable_models:
+            return False
+        if (
+            self.applicable_configurations
+            and aircraft.configuration not in self.applicable_configurations
+        ):
+            return False
+        return not (
+            self.applicable_serials
+            and aircraft.serial_number not in self.applicable_serials
+        )
+
+
+class MelDeferral(Base, TimestampMixin):
+    """
+    An open deferred defect: something inoperative that the MEL permits.
+
+    Distinct from ``Deferral``, which extends a *scheduled maintenance task*
+    past its due point.  This one records unserviceable equipment carried
+    under MEL relief, and its expiry is an airworthiness limit: past it the
+    aircraft may not be dispatched.
+    """
+
+    __tablename__ = "mel_deferrals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    aircraft_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("aircraft.id", ondelete="CASCADE"), nullable=False
+    )
+    mel_item_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("mel_items.id", ondelete="RESTRICT"), nullable=False
+    )
+    # Denormalised so the record stays readable if the MEL is revised.
+    item_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    category: Mapped[str] = mapped_column(String(8), nullable=False)
+
+    defect_description: Mapped[str] = mapped_column(Text, nullable=False)
+    discovered_on: Mapped[date] = mapped_column(Date, nullable=False)
+    # Last day the aircraft may be dispatched with this item inoperative.
+    expires_on: Mapped[date] = mapped_column(Date, nullable=False)
+    original_expires_on: Mapped[date] = mapped_column(Date, nullable=False)
+
+    quantity_inoperative: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default=DeferralStatus.OPEN.value, nullable=False
+    )
+
+    raised_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    # Licensed engineer who accepted the deferral.
+    accepted_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    work_order: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    placard_fitted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    operational_procedure_applied: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    maintenance_procedure_applied: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+
+    # One-time extension, where the authority permits it.
+    extended: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    extension_approved_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    extension_authority_reference: Mapped[str] = mapped_column(
+        Text, default="", nullable=False
+    )
+    extended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    cleared_on: Mapped[date | None] = mapped_column(Date)
+    cleared_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    rectification_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+    aircraft: Mapped[Aircraft] = relationship()
+    mel_item: Mapped[MelItem] = relationship(lazy="joined")
+
+    __table_args__ = (
+        Index("ix_mel_deferrals_aircraft_status", "aircraft_id", "status"),
+        Index("ix_mel_deferrals_expires", "expires_on"),
+    )

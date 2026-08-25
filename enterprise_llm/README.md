@@ -11,6 +11,7 @@ It does six things:
 | Answers plain-language questions from your governing documents, **with citations** | `POST /v1/ask` |
 | Consults your **other internal LLM/AI systems** and attributes what they say | same call, `[A#]` references |
 | **Predictive maintenance scheduling** from your standard maintenance programme | `/v1/maintenance/*` |
+| **MEL dispatch decision support** — may we dispatch, under what conditions, until when | `/v1/mel/*` |
 | **LaTeX** authoring and PDF compilation | `POST /v1/latex` |
 | **Application development** assistance over your own repositories | `POST /v1/dev` |
 | A drop-in **OpenAI-compatible API** so existing in-house apps integrate unchanged | `/v1/chat/completions`, `/v1/models`, `/v1/embeddings` |
@@ -337,6 +338,68 @@ card itself allows.
 The `elp-scheduler` timer re-forecasts the fleet nightly and exits non-zero if
 any aircraft is past a hard limit, so a systemd failure alert means something
 real.
+
+---
+
+## 5a. MEL dispatch decision support
+
+Load the approved Minimum Equipment List into the item catalogue:
+
+```bash
+curl -X POST http://elp:8080/v1/mel/import \
+  -H "X-API-Key: $KEY" \
+  -F file=@mel-rev6.xlsx -F source_document_key=MEL-001 \
+  -F source_revision=6 -F default_models=AW139 -F dry_run=true
+```
+
+Then ask the question a line engineer asks several times a week:
+
+```bash
+curl -X POST http://elp:8080/v1/mel/check \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"tail_number":"PP-ABC","item_number":"24-11-01",
+       "discovered_on":"2026-08-25","intended_operation":["IFR","night"]}'
+```
+
+```json
+{
+  "decision": {
+    "verdict": "go_with_conditions",
+    "dispatchable": true,
+    "summary": "Dispatch permitted under 24-11-01 (AC Generator), Category C. Rectify by 2026-09-04 (10 day(s) from today). 3 condition(s) must be satisfied first.",
+    "expires_on": "2026-09-04",
+    "conditions": ["(o) operational procedure: ...", "(m) maintenance procedure: ...", "placard: GEN 2 INOP"],
+    "citation": "MEL-001, Rev 6, item 24-11-01"
+  }
+}
+```
+
+Three rules the engine enforces, each a place real operations go wrong:
+
+- **If it is not in the MEL, it must work.** The MEL grants relief, it does not
+  restrict it. An unlisted item returns `not_in_mel` and a plain no-go, never a
+  cautious pass.
+- **The interval excludes the day of discovery.** A Category C item found on the
+  1st runs to the end of the 11th. Off-by-one here is an audit finding.
+- **Relief is per quantity.** "Two installed, one required" permits exactly one
+  inoperative; a second failure of the same item is a no-go even though the MEL
+  lists it.
+
+Recording a deferral (`POST /v1/mel/deferrals`) re-runs the full evaluation and
+**refuses anything the MEL does not permit** — including a deferral whose (o)/(m)
+procedures and placarding have not been confirmed as carried out, because a
+deferral recorded before its conditions are met was never valid. Extensions
+require `maint:approve`, are one-time, and are refused for Category A and after
+the interval has already run out.
+
+`GET /v1/mel/status` gives fleet dispatch status; a single expired item makes
+that aircraft undispatchable regardless of everything else. The nightly job
+expires overdue deferrals and exits non-zero if any aircraft cannot be
+dispatched.
+
+> Index the MEL itself as a document with `doc_type: mel` as well as importing
+> the catalogue. The catalogue drives the decisions; the indexed document lets
+> `/v1/mel/check` resolve a free-text description to candidate items.
 
 ---
 

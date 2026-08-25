@@ -299,3 +299,81 @@ class WhoAmIResponse(BaseModel):
     roles: list[str]
     scopes: list[str]
     issuer: str = ""
+
+
+# ----------------------------------------------------------------------
+# Minimum Equipment List
+# ----------------------------------------------------------------------
+
+class MelCheckRequest(BaseModel):
+    tail_number: str
+    # Identify the item directly when it is known. Otherwise describe the
+    # defect and the platform returns candidates for a human to choose from.
+    item_number: str = ""
+    description: str = Field(default="", max_length=2000)
+    discovered_on: date | None = None
+    quantity_inoperative: int = Field(default=1, ge=1, le=99)
+    # e.g. ["IFR", "night", "over water"] - checked against the item's
+    # prohibited operations.
+    intended_operation: list[str] = Field(default_factory=list)
+
+
+class MelCandidate(BaseModel):
+    item_number: str
+    title: str
+    category: str
+    ata_chapter: str = ""
+    system: str = ""
+
+
+class MelCheckResponse(BaseModel):
+    tail_number: str
+    # Present when a single item was identified.
+    decision: dict | None = None
+    # Present when the description matched several items, or none.
+    candidates: list[MelCandidate] = Field(default_factory=list)
+    needs_clarification: bool = False
+    message: str = ""
+    references: list[Reference] = Field(default_factory=list)
+
+
+class MelDeferralRequest(BaseModel):
+    tail_number: str
+    item_number: str
+    defect_description: str = Field(..., min_length=3, max_length=2000)
+    # The licensed person accepting the deferral. Defaults to the caller.
+    accepted_by: str = ""
+    discovered_on: date | None = None
+    quantity_inoperative: int = Field(default=1, ge=1, le=99)
+    work_order: str = ""
+    # Confirmation that the MEL's conditions have actually been carried out.
+    placard_fitted: bool = False
+    operational_procedure_applied: bool = False
+    maintenance_procedure_applied: bool = False
+    notes: str = ""
+
+
+class MelDeferralResponse(BaseModel):
+    id: str
+    tail_number: str
+    item_number: str
+    category: str
+    defect_description: str
+    discovered_on: date
+    expires_on: date
+    days_remaining: int
+    status: str
+    accepted_by: str
+    extended: bool = False
+    citation: str = ""
+    conditions: list[str] = Field(default_factory=list)
+
+
+class MelClearRequest(BaseModel):
+    cleared_on: date | None = None
+    rectification_notes: str = ""
+
+
+class MelExtendRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=1000)
+    authority_reference: str = ""

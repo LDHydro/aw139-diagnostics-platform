@@ -8,6 +8,7 @@ from . import (
     v1_documents,
     v1_latex,
     v1_maintenance,
+    v1_mel,
     v1_openai,
 )
 
@@ -17,6 +18,7 @@ ROUTERS = [
     v1_openai.router,
     v1_documents.router,
     v1_maintenance.router,
+    v1_mel.router,
     v1_latex.router,
     v1_dev.router,
     v1_admin.router,

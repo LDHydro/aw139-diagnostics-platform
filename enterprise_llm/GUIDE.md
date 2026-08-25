@@ -312,6 +312,80 @@ curl -X POST http://localhost:8080/v1/maintenance/plan \
 Read `rationale` on each event and the fleet-level `warnings`. Only add
 `"commit": true` once the plan looks like something you would actually do.
 
+### 4.5 Load the MEL
+
+Do this twice, deliberately — the catalogue and the document serve different
+purposes:
+
+```bash
+# The catalogue: drives dispatch decisions, intervals and expiry tracking.
+curl -X POST http://localhost:8080/v1/mel/import \
+  -H "X-API-Key: $KEY" \
+  -F file=@mel-rev6.xlsx \
+  -F source_document_key=MEL-001 -F source_revision=6 \
+  -F default_models=AW139 -F dry_run=true
+```
+
+```yaml
+# The document: lets /v1/mel/check resolve a free-text defect description
+# to candidate item numbers. Add to docs/manifest.yaml:
+  - file: mel-rev6.pdf
+    doc_key: MEL-001
+    doc_type: mel                      # required for description lookup
+    title: Minimum Equipment List
+    revision: "6"
+```
+
+Read the dry-run response before committing. Three fields matter:
+
+- **`issues`** — every rejected row. A row whose category could not be read is
+  rejected rather than guessed, because inventing a category puts a wrong
+  airworthiness limit into the system.
+- **`category_a_parsed`** — Category A items whose interval was read out of
+  the remarks prose. **Check every one of these against the paper MEL.** The
+  parser is good, but a Category A interval is item-specific and the remarks
+  column is free text.
+- **`category_a_unresolved`** — Category A items where no day-based interval
+  could be read at all, usually because the limit is stated in flight hours.
+  These need the interval entered manually; the platform will not convert
+  hours to days, because that would mean assuming a utilisation rate for an
+  airworthiness limit.
+
+**Checkpoint** — spot-check three items against the paper MEL:
+
+```bash
+curl -s "http://localhost:8080/v1/mel/check" -H "X-API-Key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"tail_number":"PP-ABC","item_number":"24-11-01"}' | python -m json.tool
+```
+
+Verify the category, the expiry date, the installed/required counts and the
+(o)/(m) procedures. Pay particular attention to the expiry: the interval
+excludes the day of discovery, so a Category C item found on the 1st should
+come back expiring on the **11th**, not the 10th.
+
+### 4.6 Backfill anything currently deferred
+
+Whatever is carried on the fleet today needs to be in the system, or the
+dispatch status will be wrong from day one:
+
+```bash
+curl -X POST http://localhost:8080/v1/mel/deferrals \
+  -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"tail_number":"PP-ABC","item_number":"24-11-01",
+       "defect_description":"Gen 2 low voltage",
+       "discovered_on":"2026-08-20",
+       "accepted_by":"J. Silva, LIC 12345",
+       "placard_fitted":true,
+       "operational_procedure_applied":true,
+       "maintenance_procedure_applied":true}'
+```
+
+Note that the platform **refuses** the deferral if the MEL does not permit it,
+or if the conditions have not been confirmed. If a backfill is rejected, that
+is worth investigating rather than working around — it means what is on the
+aircraft does not match what the MEL allows.
+
 ---
 
 ## 5. Day 4 — connect people and applications
@@ -441,6 +515,11 @@ artifacts are disposable.
 | A cancelled visit's tasks vanished | They did not — they are re-planned | Check `replacement_event_ids` in the cancel response, and `GET /v1/maintenance/events` |
 | LaTeX fails with "rejected: uses ..." | The sandbox blocked a shell-escape primitive | Working as intended. Rewrite without `\write18`/`\directlua`/absolute-path `\input` |
 | GPU shows memory used with no servers running | Hard-killed vLLM | `deploy/stop_models.sh`; if it persists, `nvidia-smi --gpu-reset` |
+| MEL check returns `not_in_mel` for something you know is listed | Item not imported, or a different item number | `GET /v1/mel/items?q=<text>`; check the import `issues` array |
+| MEL expiry looks a day early or late | It is not — the interval excludes the day of discovery | Cat C found on the 1st expires end of the 11th. Verify against the MMEL preamble |
+| `deferral cannot be recorded` on backfill | The MEL does not permit what is on the aircraft | Investigate rather than work around; the aircraft may be carrying invalid relief |
+| Category A item has no expiry | Interval stated in flight hours or cycles, not days | Enter the day limit manually; the platform will not convert |
+| Extension refused | Category A, already extended, or already expired | All three are correct refusals — an extension is granted before the limit, not after |
 
 ---
 
@@ -452,18 +531,19 @@ systems.
 
 ### Tier 1 — plugs into what is already built
 
-**8.1 MEL / CDL dispatch decision support**
+**8.1 MEL / CDL dispatch decision support — DELIVERED 2026-08-25**
 
 *"Can we dispatch with this inoperative, and for how long?"*
 
-MEL categories are literally deferral limits: Category A as specified, B three
-days, C ten days, D one hundred and twenty. That is the deferral engine in
-`elp/maintenance/events.py` with different inputs. Index the MEL as a governing
-document, model each MEL item as a task card with `interval_calendar_days` set
-from its category, and the existing forecasting, expiry tracking and approval
-workflow apply unchanged.
+Built as `elp/mel/` with its own catalogue and deferral tables rather than
+reusing task cards, because MEL relief has rules scheduled maintenance does
+not: quantity relief (installed vs required for dispatch), interactions
+between simultaneously inoperative items, (o)/(m) procedures that must be
+carried out before the deferral is valid, and prohibited operations.
 
-Highest daily value in this list, and the smallest build.
+See §4.5 to commission it and README §5a for the API. The three rules it
+enforces — unlisted means no-go, the interval excludes the day of discovery,
+and relief is per quantity — are each a place real operations go wrong.
 
 **8.2 AD and Service Bulletin applicability triage**
 
@@ -566,6 +646,29 @@ remembering, or change how the platform is used. Newest at the top.
 **Why:**
 **Watch out for:**
 -->
+
+### 2026-08-25 — MEL dispatch decision support added
+
+**Who:** initial build
+**What changed:** New `elp/mel/` package and nine `/v1/mel/*` endpoints:
+catalogue import, dispatch check, deferral lifecycle (raise, clear, one-time
+extension) and fleet dispatch status. The nightly job now expires overdue
+deferrals and exits non-zero if any aircraft is undispatchable. 51 new tests.
+**Why:** Highest-frequency decision in the department, and the one where an
+off-by-one or a missed quantity limit has direct airworthiness consequences.
+**Watch out for:**
+- Category A intervals are parsed out of free-text remarks. The import
+  response lists every one it read (`category_a_parsed`) and every one it
+  could not (`category_a_unresolved`). **Check them against the paper MEL
+  before anyone dispatches against them.**
+- Intervals stated in flight hours or cycles are deliberately *not* converted
+  to days. Enter those limits manually.
+- The MEL must be loaded twice — as a catalogue (drives decisions) and as an
+  indexed document with `doc_type: mel` (enables description lookup). Loading
+  only the document gives you search but no expiry tracking.
+- Raising a deferral is refused unless the (o)/(m) procedures and placarding
+  are confirmed applied. This is intentional and will generate questions from
+  anyone used to recording the deferral first and doing the work after.
 
 ### 2026-08-25 — Platform built and pushed
 

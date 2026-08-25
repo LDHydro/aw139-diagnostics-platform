@@ -23,6 +23,7 @@ from elp.config import get_settings  # noqa: E402
 from elp.db import close_db, get_sessionmaker  # noqa: E402
 from elp.maintenance.forecast import DueStatus  # noqa: E402
 from elp.maintenance.service import forecast_for_aircraft  # noqa: E402
+from elp.mel.service import expire_overdue, fleet_status  # noqa: E402
 from elp.models import Aircraft  # noqa: E402
 
 log = logging.getLogger("nightly_forecast")
@@ -85,15 +86,39 @@ async def main() -> int:
                 else:
                     soon.append(line)
 
+        # MEL deferrals whose rectification interval has run out. These are
+        # separate from scheduled-task limits and just as grounding.
+        expired_mel = await expire_overdue(session, today=today)
+        for row in expired_mel:
+            log.error(
+                "MEL EXPIRED: item %s expired %s and is still open",
+                row.item_number, row.expires_on,
+            )
+
+        mel_statuses = await fleet_status(session, today=today)
+        undispatchable = [s for s in mel_statuses if not s["dispatchable"]]
+        for status in undispatchable:
+            log.error("NOT DISPATCHABLE: %s", status["summary"])
+        for status in mel_statuses:
+            for soon_item in status["expiring_soon"]:
+                log.warning(
+                    "MEL expiring: %s %s (%s) in %s day(s)",
+                    status["tail_number"], soon_item["item_number"],
+                    soon_item["category"], soon_item["days_remaining"],
+                )
+
+        await session.commit()
+
     await close_db()
 
     print(
         f"\nsummary for {today.isoformat()}: "
-        f"{len(grounded)} past hard limit, {len(overdue)} overdue, {len(soon)} due soon"
+        f"{len(grounded)} past hard limit, {len(overdue)} overdue, {len(soon)} due soon, "
+        f"{len(undispatchable)} aircraft not dispatchable on MEL"
     )
     # Non-zero exit makes the systemd unit show as failed, which is what you
-    # want when an aircraft is past a limit.
-    return 2 if grounded else 0
+    # want when an aircraft is past a limit or cannot be dispatched.
+    return 2 if (grounded or undispatchable) else 0
 
 
 if __name__ == "__main__":

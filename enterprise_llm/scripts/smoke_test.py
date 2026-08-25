@@ -227,6 +227,59 @@ def main() -> int:
     except Exception as exc:
         report("maintenance", FAIL, str(exc))
 
+    # --- MEL ---------------------------------------------------------------
+    try:
+        r = client.get("/v1/mel/items?limit=5")
+        if r.status_code == 200:
+            items = r.json()
+            report(
+                "MEL catalogue",
+                PASS if items else WARN,
+                f"{len(items)} item(s) sampled" if items else "no MEL items imported",
+            )
+            if items:
+                # Verify the interval arithmetic end to end against a real item.
+                probe = items[0]
+                r = client.post("/v1/mel/check", json={
+                    "tail_number": args.tail_number or "UNKNOWN",
+                    "item_number": probe["item_number"],
+                })
+                if r.status_code == 200:
+                    decision = r.json().get("decision") or {}
+                    report(
+                        "MEL dispatch check",
+                        PASS,
+                        f"{probe['item_number']} (Cat {probe['category']}) -> "
+                        f"{decision.get('verdict')}, expires {decision.get('expires_on')}",
+                    )
+                elif r.status_code == 404:
+                    report("MEL dispatch check", WARN,
+                           "no aircraft to check against; pass --tail-number")
+                else:
+                    report("MEL dispatch check", FAIL, f"{r.status_code}: {r.text[:200]}")
+        elif r.status_code == 403:
+            report("MEL catalogue", WARN, "credential lacks maint:read")
+        else:
+            report("MEL catalogue", FAIL, f"{r.status_code}: {r.text[:150]}")
+    except Exception as exc:
+        report("MEL", FAIL, str(exc))
+
+    try:
+        r = client.get("/v1/mel/status")
+        if r.status_code == 200:
+            summary = r.json()["summary"]
+            report(
+                "MEL fleet dispatch status",
+                PASS if summary["not_dispatchable"] == 0 else WARN,
+                f"{summary['dispatchable']}/{summary['total']} dispatchable, "
+                f"{summary['open_items']} open item(s)"
+                + (f"; GROUNDED: {summary['grounded_tails']}" if summary["grounded_tails"] else ""),
+            )
+        elif r.status_code != 403:
+            report("MEL fleet dispatch status", FAIL, f"{r.status_code}: {r.text[:150]}")
+    except Exception as exc:
+        report("MEL fleet dispatch status", FAIL, str(exc))
+
     # --- LaTeX -------------------------------------------------------------
     try:
         r = client.post(
