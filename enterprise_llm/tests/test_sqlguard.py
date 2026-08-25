@@ -24,7 +24,10 @@ from elp.reports.sqlguard import (
 
 @pytest.fixture
 def settings():
+    # These cases are about the dialect-independent rules. The T-SQL
+    # specifics NAMIS actually runs on are covered in test_namis.py.
     return ReportSettings(
+        sql_dialect="postgresql",
         allowed_tables=["work_orders", "aircraft", "defects"],
         allowed_schemas=["namis"],
         max_rows=5000,
@@ -33,8 +36,8 @@ def settings():
 
 @pytest.fixture
 def open_settings():
-    """The default: no allowlist configured."""
-    return ReportSettings()
+    """No allowlist configured."""
+    return ReportSettings(sql_dialect="postgresql")
 
 
 # ----------------------------------------------------------------------
@@ -162,7 +165,9 @@ def test_an_existing_limit_is_respected(settings):
 
 
 def test_fetch_first_counts_as_a_limit():
-    _sql, applied = enforce_limit("SELECT * FROM t FETCH FIRST 10 ROWS ONLY", 5000)
+    _sql, applied = enforce_limit(
+        "SELECT * FROM t FETCH FIRST 10 ROWS ONLY", 5000, "postgresql"
+    )
     assert applied is None
 
 

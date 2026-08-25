@@ -36,6 +36,9 @@ dependencies = [
 ldap = ["ldap3>=2.9.1"]
 # Reading .xlsx maintenance schedules directly.
 excel = ["openpyxl>=3.1.5"]
+# NAMIS is Microsoft SQL Server. Also needs the Microsoft ODBC Driver 18
+# and unixODBC installed on the host - they are not pip-installable.
+mssql = ["aioodbc>=0.5.0", "pyodbc>=5.1.0"]
 # Model serving. Installed separately by deploy/install_host.sh because the
 # PyTorch build must come from the CUDA 12.8 index for Blackwell.
 serving = ["vllm>=0.9.0"]

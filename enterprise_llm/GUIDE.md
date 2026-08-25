@@ -399,12 +399,44 @@ NAMIS_PASSWORD=<the read-only account password>
 ```
 
 ```bash
+# Host prerequisite: NAMIS is SQL Server, so the box needs the Microsoft
+# ODBC Driver 18 and unixODBC. Then:
+pip install -e ".[mssql]"
+```
+
+```bash
 # .env
 ELP_REPORTS__NAMIS_KIND=sql
-ELP_REPORTS__NAMIS_DSN=postgresql+asyncpg://namis_readonly:${PASSWORD}@namis.corp.internal:5432/namis
-ELP_REPORTS__ALLOWED_SCHEMAS=["namis"]
-ELP_REPORTS__ALLOWED_TABLES=[]        # tighten once you know what is used
+ELP_REPORTS__SQL_DIALECT=mssql
+ELP_REPORTS__NAMIS_DSN=mssql+aioodbc://elp_reports_ro:${PASSWORD}@24pwnmsap001.nts.ops:1433/NAMISNNSS?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes
+ELP_REPORTS__CATALOG_PATH=/opt/elp/config/namis-catalog.json
+ELP_REPORTS__ALLOWED_TABLES=[]        # empty: the catalogue is the allowlist
 ```
+
+Two things to get right before this works:
+
+- **A dedicated read-only login, not Integrated Security.** The report
+  generator's "run as yourself" model is correct for a desktop tool and
+  impossible for a scheduled job — a 03:00 report has no signed-in user. Ask
+  your DBA for `elp_reports_ro` with `db_datareader` and nothing else.
+- **`TrustServerCertificate=yes`** is needed against the on-prem self-signed
+  certificate, matching what the production ops apps already use. Drop it
+  once a trusted certificate is installed.
+
+**Deploy the catalogue.** Export it from the report generator
+(`build-windows.sh` regenerates it) and copy it to
+`/opt/elp/config/namis-catalog.json`. It is deliberately not in the
+repository. Confirm it loaded:
+
+```bash
+journalctl -u elp-gateway | grep "NAMIS catalogue"
+# loaded NAMIS catalogue: 585 tables, 8231 columns, 723 relationships, 22 groups
+```
+
+Without it the platform falls back to live introspection, which recovers
+column names but **not the join relationships** — and a compound key joined
+on one column instead of two produces a cartesian product that reads as real
+data.
 
 **Checkpoint 1 — prove the account cannot write.** Do this before anyone
 saves a report. The platform attempts a write and expects NAMIS to refuse:
@@ -770,6 +802,41 @@ remembering, or change how the platform is used. Newest at the top.
 **Why:**
 **Watch out for:**
 -->
+
+### 2026-08-25 — NAMIS reporting reconciled with the real system
+
+**Who:** initial build, from the NAMIS assessment pack
+**What changed:** The reporting subsystem now targets NAMIS as it actually
+is. Three defects fixed and one capability added:
+
+- **`LIMIT` is a syntax error in T-SQL.** Row limiting now emits `TOP (n)`,
+  injected into the outermost SELECT (correct for CTEs too). Every generated
+  query would have failed at the server before this.
+- **Bracket-quoted identifiers were invisible to the guard.**
+  `[dbo].[WorkRequest]` matched no table pattern, so every bracket-quoted
+  reference bypassed the allowlist unchecked.
+- **System databases slipped through three-part names.** In
+  `master.dbo.sysdatabases` the dangerous qualifier is the first one; only
+  the last was being checked.
+- **The field catalogue is now loaded and used** — 585 tables, 8,231 columns,
+  723 relationships. It grounds query authoring and serves as the allowlist.
+
+Also added: `sp_setapprole` support, SQL Server isolation-level control, a
+permissions-based read-only probe, and SQL error translation copied from what
+the report generator learned in this environment (18456, 229, 15151, 208).
+
+**Watch out for:**
+- **"Run as yourself" cannot work here.** A scheduled report has no signed-in
+  user. Use a dedicated read-only SQL login; this is also what makes the
+  read-only guarantee real.
+- The catalogue is **not committed** — deploy it to
+  `/opt/elp/config/namis-catalog.json`. Without it, joins are guessed.
+- Reporting queries take shared locks on a live OLTP system.
+  `ELP_REPORTS__MSSQL_ISOLATION_LEVEL` is the lever; ask the DBA whether
+  SNAPSHOT is enabled before reaching for READ UNCOMMITTED.
+- Security findings F-1/F-2 remain **live issues in the current desktop
+  deployment** and are not fixed by anything here. Rotate the app-role
+  password and set `Encrypt=true` independently.
 
 ### 2026-08-25 — Open item: port the existing report builder
 

@@ -94,3 +94,6 @@ enterprise_llm/artifacts/
 enterprise_llm/logs/
 enterprise_llm/.cache/
 enterprise_llm/*.egg-info/
+
+# NAMIS field catalogue — internal schema, deployed alongside config
+enterprise_llm/config/namis-catalog.json

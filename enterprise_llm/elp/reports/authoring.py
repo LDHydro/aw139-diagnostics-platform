@@ -31,27 +31,29 @@ from .sqlguard import UnsafeQuery, validate
 log = logging.getLogger(__name__)
 
 _AUTHOR_PROMPT = """\
-You write read-only SQL for an aviation maintenance department's operational \
-reports, against the NAMIS system.
+You write read-only {dialect_name} queries for an aviation maintenance \
+department's operational reports, against the NAMIS system.
 
-SCHEMA (these are the only tables and columns that exist)
+SCHEMA — these are the only tables and columns that exist. Column types are \
+shown; respect them.
 {schema}
 
 RULES
 - Output a SINGLE SELECT (or WITH ... SELECT) statement. Nothing else.
-- Never write INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, GRANT, COPY, SET \
-or any other statement that changes data, schema or server state.
+- Never write INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, GRANT, EXEC, \
+BACKUP, DBCC or any other statement that changes data, schema or server state.
 - Use ONLY tables and columns from the schema above. If the request needs \
-something that is not there, say so instead of inventing a column.
-- Always include an explicit ORDER BY so results are stable between runs, \
-and a LIMIT appropriate to the request.
-- Prefer explicit date ranges computed in SQL (e.g. CURRENT_DATE - INTERVAL \
-'30 days') over hard-coded dates, so the report stays correct when it runs \
-again next month.
-- Alias computed columns with clear, human-readable names: this output is \
-read by operations staff, not by engineers.
+something that is not there, say so in the EXPLANATION instead of inventing \
+a column name.
+- Join using the KNOWN JOINS listed above, exactly as given. Where a join has \
+several columns it is a compound key — use every column, or you will get a \
+cartesian product that looks like real data.
+{dialect_rules}
+- Alias computed columns with clear, human-readable names: operations staff \
+read this output, not engineers.
+- Always include an explicit ORDER BY so results are stable between runs.
 
-OUTPUT FORMAT - exactly these three sections, in this order:
+OUTPUT FORMAT — exactly these three sections, in this order:
 
 SQL:
 <the statement>
@@ -62,6 +64,32 @@ EXPLANATION:
 ASSUMPTIONS:
 <one bullet per assumption you had to make; write "none" if there were none>
 """
+
+# Dialect differences that produce a syntax error rather than a subtly wrong
+# answer, so they are stated explicitly rather than left to the model.
+_DIALECT_RULES = {
+    "mssql": """\
+- This is Microsoft SQL Server (T-SQL). Limit rows with SELECT TOP (n), \
+NOT with LIMIT — LIMIT is a syntax error here.
+- Quote identifiers with square brackets and write three-part names for \
+tables outside the default database, e.g. [AMO_NASAWeb].[dbo].[FlightRecordHeaders]. \
+Never write a four-part name: that reaches a linked server and is refused.
+- Date arithmetic uses GETDATE() and DATEADD/DATEDIFF, e.g. \
+WHERE CreatedDt >= DATEADD(day, -30, GETDATE()). There is no INTERVAL syntax.
+- Use ISNULL() or COALESCE(), and CAST/CONVERT for type changes.""",
+    "postgresql": """\
+- This is PostgreSQL. Limit rows with LIMIT n.
+- Date arithmetic uses CURRENT_DATE - INTERVAL '30 days'.""",
+    "mysql": """\
+- This is MySQL. Limit rows with LIMIT n.
+- Date arithmetic uses DATE_SUB(NOW(), INTERVAL 30 DAY).""",
+}
+
+_DIALECT_NAMES = {
+    "mssql": "Microsoft SQL Server (T-SQL)",
+    "postgresql": "PostgreSQL",
+    "mysql": "MySQL",
+}
 
 _REPAIR_PROMPT = """\
 The query you wrote was rejected by the safety validator.
@@ -100,6 +128,8 @@ class QueryDraft:
     repaired: bool = False
     valid: bool = False
     rejection: str = ""
+    # Catalogue tables shown to the model for this request.
+    tables_offered: list[str] = field(default_factory=list)
 
 
 def _extract_section(text: str, name: str) -> str:
@@ -148,17 +178,49 @@ async def draft_query(
 ) -> QueryDraft:
     """Author a query for a plain-language request, grounded in the real schema."""
     settings = settings or get_settings().reports
-    if not tables:
+
+    # Prefer the exported catalogue: it carries the join relationships, and
+    # it lets the schema shown be narrowed to what this request needs. The
+    # full NAMIS schema is 8,000-odd columns - it would not fit in the
+    # context window, and if it did the relevant tables would be buried.
+    from .catalog import get_catalog
+
+    catalog = get_catalog()
+    selected_names: list[str] = []
+    if catalog is not None and len(catalog):
+        chosen = catalog.select_for_request(
+            request_text, limit=settings.catalog_tables_per_request
+        )
+        if chosen:
+            schema = catalog.render_for_prompt(chosen)
+            selected_names = [c.name for c in chosen]
+            log.info(
+                "grounding the query in %d catalogued table(s): %s",
+                len(chosen), ", ".join(selected_names[:8]),
+            )
+        else:
+            schema = render_schema_catalogue(tables)
+    elif tables:
+        schema = render_schema_catalogue(tables)
+    else:
         raise ValueError(
-            "no NAMIS tables are visible, so a query cannot be authored. Check "
-            "the reporting account's permissions and the allowlist."
+            "no NAMIS tables are visible and no catalogue is loaded, so a query "
+            "cannot be authored. Check the reporting account's permissions, or "
+            "set ELP_REPORTS__CATALOG_PATH."
         )
 
-    schema = render_schema_catalogue(tables)
+    dialect = settings.sql_dialect
     client, profile = get_router().resolve(TaskKind.CODE)
 
     messages = [
-        ChatMessage("system", _AUTHOR_PROMPT.format(schema=schema)),
+        ChatMessage(
+            "system",
+            _AUTHOR_PROMPT.format(
+                schema=schema,
+                dialect_name=_DIALECT_NAMES.get(dialect, dialect),
+                dialect_rules=_DIALECT_RULES.get(dialect, ""),
+            ),
+        ),
         ChatMessage("user", f"REPORT REQUEST\n{request_text}"),
     ]
 
@@ -187,6 +249,7 @@ async def draft_query(
         draft.valid = True
         draft.rejection = ""
         draft.tables = guard.tables
+        draft.tables_offered = selected_names
         draft.warnings = list(guard.notes)
         # Surface the query that will actually run, LIMIT included, so the
         # approver reviews the real thing rather than a prettier version.

@@ -490,11 +490,64 @@ minutes; each report fires on its own cron expression in its own timezone.
 Reports run one after another, never concurrently — a burst of simultaneous
 queries at 03:00 is how a reporting job becomes an outage.
 
-> **What you need to supply:** the NAMIS connection details, a read-only
-> account, and the table allowlist. The platform does not assume a NAMIS
-> schema — it introspects the tables that account can see and grounds query
-> authoring in the real column names, which is what stops the model inventing
-> plausible-looking fields.
+### NAMIS specifics
+
+NAMIS is **Microsoft SQL Server** — four databases (`NAMISNNSS`,
+`AMO_NASAWeb`, `OpsDBAMO`, `WebSupport_NASAWeb`) on one instance, reached
+with three-part names. The platform is dialect-aware throughout: `TOP (n)`
+rather than `LIMIT`, bracket-quoted identifiers, `DATEADD` rather than
+`INTERVAL`, and T-SQL's own escape routes (`OPENROWSET`, `OPENQUERY`,
+`xp_cmdshell`, `WAITFOR DELAY`, `DBCC`) blocked by the guard. Four-part names
+are refused outright — those reach a linked server, i.e. off this instance.
+
+**The field catalogue is the most valuable input.** The existing NAMIS report
+generator exports one: 585 tables, 8,231 columns with real SQL types, and 723
+join relationships. Point `ELP_REPORTS__CATALOG_PATH` at it and two things
+follow:
+
+- **Query authoring is grounded in real joins.** The catalogue knows that
+  `AIRCRAFT` joins `WorkRequest` on *both* `AssetKey` and `AssetSite`.
+  Rendering only half a compound key produces a cartesian product that looks
+  like real data — the worst kind of wrong report. Schema introspection
+  cannot recover this; the catalogue can.
+- **The catalogue is the allowlist.** A table absent from it is one the
+  report generator never knew about, and not something to report on by
+  accident. Even a typo (`WorkRequests`) is refused.
+
+The whole schema does not go in the prompt — 8,231 columns would not fit, and
+if they did they would bury the ten that matter. Each request is scored
+against table names, groups and columns; the best tables are selected and
+their joinable neighbours pulled in. A typical request renders ~1,700 tokens
+of precisely relevant schema.
+
+### Connecting a headless service
+
+The existing generator offers "run as yourself" with Integrated Security, and
+for a desktop tool that is the right answer. **It cannot work here.** A report
+firing at 03:00 has no signed-in user, so the platform needs a service
+identity — and that identity should be a dedicated **read-only SQL login**:
+
+```sql
+CREATE LOGIN elp_reports_ro WITH PASSWORD = '...';
+CREATE USER  elp_reports_ro FOR LOGIN elp_reports_ro;
+ALTER ROLE   db_datareader ADD MEMBER elp_reports_ro;   -- and nothing else
+```
+
+`/v1/health/deep` then proves it, by asking SQL Server what that login may
+actually do — `IS_MEMBER('db_datawriter')` and `sys.fn_my_permissions` — which
+writes nothing and names precisely what is wrong if the answer is bad. (A
+temp-table probe would be useless on SQL Server: `public` can create `#temp`
+objects, so a genuinely read-only login would pass it.)
+
+The application role (`sp_setapprole`) is supported for sites where the
+service login cannot be granted direct rights, but leaving it unset is the
+better posture. Where it is used, the platform holds the credential
+server-side in a root-owned file — which is what security finding F-1's
+remediation asks for, and the opposite of shipping it inside client binaries.
+
+> **What you need to supply:** the read-only login, the ODBC Driver 18 for
+> SQL Server on the host, and the exported catalogue. The platform assumes no
+> NAMIS schema of its own.
 
 ---
 

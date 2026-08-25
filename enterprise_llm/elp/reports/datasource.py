@@ -14,6 +14,7 @@ provisioning NAMIS with a read-only account: **do that first.**
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -34,6 +35,71 @@ _REDACTED = "[redacted]"
 
 class DataSourceError(RuntimeError):
     """NAMIS could not be reached, or refused the request."""
+
+
+# SQL Server error numbers, mapped to guidance that names the fix. Taken
+# from what the existing NAMIS report generator learned in this environment:
+# these are the failures that actually happen, and the raw driver text for
+# each is unhelpful to the person who asked for a report.
+_SQL_ERROR_GUIDANCE: list[tuple[str, str]] = [
+    (
+        "18456",
+        "Login failed. The reporting account is not provisioned on this SQL "
+        "Server - that needs a DBA, not a configuration change.",
+    ),
+    (
+        "4060",
+        "Login failed for the requested database. Check Initial Catalog and "
+        "that the account has access to NAMISNNSS.",
+    ),
+    (
+        "229",
+        "Permission denied on an object. The account can log in but lacks "
+        "SELECT on a table the report needs. Either grant it, or configure "
+        "the application role (ELP_REPORTS__NAMIS_APP_ROLE).",
+    ),
+    (
+        "230",
+        "Permission denied on a column. The account lacks SELECT on one of "
+        "the columns the report selects.",
+    ),
+    (
+        "15151",
+        "The application role or its password is wrong. The password may have "
+        "been rotated - see security finding F-1.",
+    ),
+    (
+        "15421",
+        "The application role name or password is not valid. Check "
+        "ELP_REPORTS__NAMIS_APP_ROLE and its password environment variable.",
+    ),
+    (
+        "208",
+        "Invalid object name. The table exists in the catalogue but not in "
+        "this database - check the three-part name and that all four "
+        "databases live on the instance you connected to.",
+    ),
+]
+
+
+def _translate_sql_error(exc: Exception) -> str:
+    """Turn a driver exception into something the requester can act on."""
+    message = str(exc)
+    for number, guidance in _SQL_ERROR_GUIDANCE:
+        if number in message:
+            return f"{guidance} (SQL error {number})"
+    lowered = message.lower()
+    if "certificate" in lowered:
+        return (
+            "the server's TLS certificate was not trusted. Add "
+            "TrustServerCertificate=true to the connection string as an interim "
+            "measure inside the VPN, or install a trusted certificate. " + message
+        )
+    if "timeout" in lowered or "timed out" in lowered:
+        return f"the connection timed out - check VPN reachability. {message}"
+    if "login timeout" in lowered or "server was not found" in lowered:
+        return f"the SQL Server could not be reached. {message}"
+    return message
 
 
 @dataclass
@@ -139,6 +205,13 @@ class SqlNamisSource(NamisSource):
                 "options": "-c default_transaction_read_only=on",
                 "application_name": "elp-reports",
             }
+        if "mssql" in dsn or "pyodbc" in dsn or "aioodbc" in dsn:
+            # SQL Server has no session-level read-only switch. The controls
+            # are the login's permissions (checked by verify_read_only) and
+            # the statement validator. ApplicationIntent is a routing hint,
+            # not a permission - it only takes effect against an availability
+            # group replica - but it costs nothing and is correct intent.
+            return {}
         return {}
 
     def engine(self) -> AsyncEngine:
@@ -167,9 +240,10 @@ class SqlNamisSource(NamisSource):
 
         Run at commissioning and from ``/v1/health/deep``.
         """
-        probe = "CREATE TEMP TABLE _elp_readonly_probe (x integer)"
         try:
             async with self.engine().connect() as connection:
+                if connection.dialect.name == "mssql":
+                    return await self._verify_read_only_mssql(connection)
                 if connection.dialect.name != "postgresql":
                     return {
                         "read_only": None,
@@ -179,6 +253,7 @@ class SqlNamisSource(NamisSource):
                             "SELECT only"
                         ),
                     }
+                probe = "CREATE TEMP TABLE _elp_readonly_probe (x integer)"
                 try:
                     await connection.execute(text(probe))
                 except Exception as exc:
@@ -222,6 +297,29 @@ class SqlNamisSource(NamisSource):
         if self._schema_cache is not None and not refresh:
             return self._schema_cache
 
+        # The exported catalogue is richer than anything introspection can
+        # recover - it carries the join relationships - so prefer it and fall
+        # back to live introspection only when it is absent.
+        from .catalog import get_catalog
+
+        catalog = get_catalog()
+        if catalog is not None and len(catalog):
+            tables = [
+                TableInfo(
+                    name=spec.table or spec.name,
+                    schema=spec.schema,
+                    comment=spec.group,
+                    columns=[
+                        ColumnInfo(name=c.name, type=c.sql, nullable=c.nullable)
+                        for c in spec.columns
+                    ],
+                )
+                for spec in catalog.tables.values()
+            ]
+            self._schema_cache = tables
+            log.info("using the NAMIS catalogue: %d table(s)", len(tables))
+            return tables
+
         allowed_schemas = [s.lower() for s in self.settings.allowed_schemas]
         allowed_tables = {t.lower() for t in self.settings.allowed_tables}
 
@@ -259,6 +357,117 @@ class SqlNamisSource(NamisSource):
         log.info("introspected %d NAMIS table(s)", len(tables))
         return tables
 
+    async def _verify_read_only_mssql(self, connection) -> dict:
+        """
+        Ask SQL Server what this login may actually do.
+
+        A temp-table probe is useless here: creating ``#temp`` objects only
+        needs rights in tempdb, which ``public`` holds by default, so a
+        genuinely read-only login would still pass it. Interrogating the
+        login's own permissions is both safe - it writes nothing - and
+        precise about what is wrong.
+        """
+        probe = text(
+            "SELECT "
+            "  CAST(ISNULL(IS_MEMBER('db_owner'), 0) AS int)      AS is_owner, "
+            "  CAST(ISNULL(IS_MEMBER('db_datawriter'), 0) AS int) AS is_writer, "
+            "  (SELECT COUNT(*) FROM sys.fn_my_permissions(NULL, 'DATABASE') "
+            "     WHERE permission_name IN "
+            "     ('INSERT','UPDATE','DELETE','ALTER','CONTROL','CREATE TABLE')) "
+            "                                                      AS write_perms"
+        )
+        try:
+            row = (await connection.execute(probe)).one()
+        except Exception as exc:
+            return {
+                "read_only": None,
+                "detail": f"could not read this login's permissions: {exc}",
+            }
+
+        is_owner, is_writer, write_perms = int(row[0]), int(row[1]), int(row[2])
+        if is_owner or is_writer or write_perms:
+            reasons = []
+            if is_owner:
+                reasons.append("it is a member of db_owner")
+            if is_writer:
+                reasons.append("it is a member of db_datawriter")
+            if write_perms:
+                reasons.append(f"it holds {write_perms} database-level write permission(s)")
+            log.error(
+                "SECURITY: the NAMIS reporting login can write. %s", "; ".join(reasons)
+            )
+            return {
+                "read_only": False,
+                "detail": (
+                    "the NAMIS login CAN WRITE: "
+                    + "; ".join(reasons)
+                    + ". Grant db_datareader (or explicit SELECT) and nothing else."
+                ),
+            }
+
+        return {
+            "read_only": True,
+            "detail": (
+                "the login holds no database-level write permission and is in "
+                "neither db_owner nor db_datawriter"
+            ),
+        }
+
+    async def _begin_session(self, connection) -> None:
+        """Per-connection setup before the report query runs."""
+        dialect = connection.dialect.name
+
+        if dialect == "postgresql":
+            await connection.execute(text("SET TRANSACTION READ ONLY"))
+            await connection.execute(
+                text(
+                    f"SET LOCAL statement_timeout = "
+                    f"{int(self.settings.statement_timeout_ms)}"
+                )
+            )
+            return
+
+        if dialect in {"mysql", "mariadb"}:
+            await connection.execute(text("SET SESSION TRANSACTION READ ONLY"))
+            await connection.execute(
+                text(
+                    f"SET SESSION max_execution_time = "
+                    f"{int(self.settings.statement_timeout_ms)}"
+                )
+            )
+            return
+
+        if dialect == "mssql":
+            # Reporting against a live OLTP system takes shared locks that can
+            # block the technicians using it. The isolation level is the lever;
+            # see ELP_REPORTS__MSSQL_ISOLATION_LEVEL for the trade.
+            level = self.settings.mssql_isolation_level
+            await connection.execute(
+                text(f"SET TRANSACTION ISOLATION LEVEL {level}")
+            )
+
+            # The application role, when the reporting login lacks direct
+            # table rights. Leaving both settings empty is the better posture:
+            # queries then run with the login's own permissions.
+            role = self.settings.namis_app_role
+            password = os.environ.get(self.settings.namis_app_role_env_var, "")
+            if role and password:
+                try:
+                    await connection.execute(
+                        text("EXEC sp_setapprole @rolename = :role, @password = :pwd"),
+                        {"role": role, "pwd": password},
+                    )
+                except Exception as exc:
+                    raise DataSourceError(
+                        f"the NAMIS application role '{role}' could not be "
+                        f"activated: {_translate_sql_error(exc)}"
+                    ) from exc
+            elif role and not password:
+                raise DataSourceError(
+                    f"ELP_REPORTS__NAMIS_APP_ROLE is set to '{role}' but "
+                    f"${self.settings.namis_app_role_env_var} is empty"
+                )
+
     async def run(self, query: str, parameters: dict | None = None) -> QueryResult:
         try:
             guard = validate(query, self.settings)
@@ -270,31 +479,32 @@ class SqlNamisSource(NamisSource):
 
         try:
             async with engine.connect() as connection:
-                # Layer two: even a mis-provisioned account cannot write
-                # inside a read-only transaction.
-                dialect = connection.dialect.name
-                if dialect == "postgresql":
-                    await connection.execute(text("SET TRANSACTION READ ONLY"))
-                    await connection.execute(
-                        text(f"SET LOCAL statement_timeout = {int(self.settings.statement_timeout_ms)}")
-                    )
-                elif dialect in {"mysql", "mariadb"}:
-                    await connection.execute(
-                        text("SET SESSION TRANSACTION READ ONLY")
-                    )
-                    await connection.execute(
-                        text(f"SET SESSION max_execution_time = {int(self.settings.statement_timeout_ms)}")
-                    )
+                await self._begin_session(connection)
 
-                result = await connection.execute(text(guard.sql), parameters or {})
+                # A driver-side timeout is not guaranteed on every dialect, so
+                # the wall clock is enforced here as well. A report that runs
+                # for ten minutes against production is an incident.
+                timeout_s = max(1.0, self.settings.statement_timeout_ms / 1000)
+                result = await asyncio.wait_for(
+                    connection.execute(text(guard.sql), parameters or {}),
+                    timeout=timeout_s,
+                )
                 columns = list(result.keys())
                 fetched = result.fetchmany(self.settings.max_rows + 1)
                 # Never commit: a read-only report has nothing to persist.
                 await connection.rollback()
+        except TimeoutError as exc:
+            raise DataSourceError(
+                f"the query exceeded {self.settings.statement_timeout_ms} ms and "
+                "was abandoned. Narrow the date range or add a more selective "
+                "filter."
+            ) from exc
         except DataSourceError:
             raise
         except Exception as exc:
-            raise DataSourceError(f"NAMIS query failed: {exc}") from exc
+            raise DataSourceError(
+                f"NAMIS query failed: {_translate_sql_error(exc)}"
+            ) from exc
 
         duration_ms = (time.monotonic() - started) * 1000
         truncated = len(fetched) > self.settings.max_rows

@@ -47,6 +47,9 @@ _FORBIDDEN_KEYWORDS = {
     "listen", "notify", "lock", "set", "reset", "discard",
     "begin", "commit", "rollback", "savepoint", "start",
     "refresh", "attach", "detach", "pragma",
+    # T-SQL. WAITFOR takes no parentheses, so the function scan misses it,
+    # and WAITFOR DELAY is a free denial-of-service against the connection.
+    "waitfor", "shutdown", "kill", "backup", "restore", "dbcc", "bulk",
 }
 
 # Functions and constructs that read files, run programs, reach the network
@@ -62,13 +65,27 @@ _FORBIDDEN_FUNCTIONS = {
     "load_extension", "system", "shell", "xp_cmdshell",
     "benchmark", "sleep", "waitfor", "sp_executesql",
     "into_outfile", "load_file",
+    # SQL Server: file, linked-server and OS reach.
+    "openrowset", "opendatasource", "openquery", "openxml",
+    "xp_dirtree", "xp_fileexist", "xp_regread", "xp_subdirs",
+    "sp_oacreate", "sp_oamethod", "sp_oagetproperty", "sp_addlinkedserver",
+    "sp_setapprole", "sp_configure", "fn_get_audit_file", "fn_trace_gettable",
 }
 
 # Catalog and system schemas: reading them leaks structure and credentials
 # metadata, and no operational report needs them.
 _FORBIDDEN_SCHEMAS = {
     "pg_catalog", "information_schema", "pg_toast", "pg_temp",
-    "mysql", "sys", "performance_schema", "master", "msdb",
+    "mysql", "sys", "performance_schema", "master", "msdb", "tempdb", "model",
+}
+
+# T-SQL quotes identifiers with brackets: [AMO_NASAWeb].[dbo].[WORKREQUEST]
+_BRACKET_IDENT = re.compile(r"\[([^\]]*)\]")
+# SQL Server system catalogue views. Not prefixed pg_, so named explicitly.
+_SYSTEM_TABLES = {
+    "sysdatabases", "sysobjects", "syscolumns", "sysusers", "syslogins",
+    "sysprocesses", "sysservers", "sysaltfiles", "sysfiles", "sysindexes",
+    "sysconfigures", "syscomments", "sysdepends", "sysmessages",
 }
 
 _SINGLE_LINE_COMMENT = re.compile(r"--[^\n]*")
@@ -81,11 +98,19 @@ _DOLLAR_QUOTED = re.compile(r"\$([A-Za-z_]\w*)?\$.*?\$\1?\$", re.DOTALL)
 _TABLE_REF = re.compile(
     r"\b(?:from|join|into|update)\s+"
     r"(?!\s*\()"                       # skip subqueries: FROM ( SELECT ...
-    r"([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){0,2})",
+    r"([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){0,3})",
     re.IGNORECASE,
 )
 _FUNCTION_CALL = re.compile(r"\b([A-Za-z_][\w$]*)\s*\(")
-_LIMIT_PRESENT = re.compile(r"\blimit\s+\d+|\bfetch\s+first\b|\btop\s+\d+\b", re.IGNORECASE)
+_LIMIT_PRESENT = re.compile(
+    r"\blimit\s+\d+"          # PostgreSQL / MySQL
+    r"|\bfetch\s+first\b"     # ANSI
+    r"|\bfetch\s+next\b"      # T-SQL OFFSET ... FETCH NEXT
+    r"|\btop\s*\(?\s*\d+"    # T-SQL TOP n / TOP (n)
+    r"|\btop\s+percent\b",
+    re.IGNORECASE,
+)
+_SELECT_TOKEN = re.compile(r"\bselect\b", re.IGNORECASE)
 
 
 @dataclass
@@ -112,6 +137,10 @@ def _mask(sql: str) -> str:
     # Double quotes are identifiers in standard SQL, so keep their content
     # for table-name extraction but normalise the quoting.
     masked = _DOUBLE_QUOTED.sub(lambda m: m.group().replace('"', " "), masked)
+    # T-SQL bracket quoting: [AMO_NASAWeb].[dbo].[WORKREQUEST] must reduce to
+    # AMO_NASAWeb.dbo.WORKREQUEST, or the dotted-name regex below sees
+    # nothing and every three-part reference slips past the allowlist.
+    masked = _BRACKET_IDENT.sub(lambda m: m.group(1), masked)
     return masked
 
 
@@ -204,16 +233,46 @@ def check_tables(
     allowed_tables = {t.lower() for t in settings.allowed_tables}
     allowed_schemas = {s.lower() for s in settings.allowed_schemas}
 
-    for table in tables:
-        schema = table.split(".")[0] if "." in table else ""
-        bare = table.split(".")[-1]
+    # When no explicit allowlist is configured, the exported catalogue is the
+    # allowlist. A table absent from it is one the NAMIS report generator
+    # never knew about, which is not something operations should be reporting
+    # on by accident.
+    if not allowed_tables and not allowed_schemas:
+        from .catalog import get_catalog
 
-        if schema and schema in _FORBIDDEN_SCHEMAS:
+        catalog = get_catalog()
+        if catalog is not None and len(catalog):
+            allowed_tables = set(catalog.allowed_table_names())
+
+    for table in tables:
+        parts = table.split(".")
+        if len(parts) > 3:
+            # server.database.schema.table - a linked server, i.e. a route
+            # out of this database entirely. Never permitted in a report.
             raise UnsafeQuery(
-                f"the query reads from the system schema '{schema}', which is "
-                "not permitted"
+                f"the query references '{table}' as a four-part name, which "
+                "reaches another server through a linked-server definition. "
+                "Reports may only read the databases on this instance."
             )
-        if bare.startswith("pg_") or bare.startswith("sqlite_"):
+        # Three-part names are normal here: NAMIS reaches AMO_NASAWeb,
+        # OpsDBAMO and WebSupport_NASAWeb on the same instance.
+        schema = parts[-2] if len(parts) >= 2 else ""
+        bare = parts[-1]
+
+        # Check every qualifier, not just the one nearest the table: in
+        # master.dbo.sysdatabases the dangerous part is the database name,
+        # which sits two positions from the end.
+        for qualifier in parts[:-1]:
+            if qualifier in _FORBIDDEN_SCHEMAS:
+                raise UnsafeQuery(
+                    f"the query reads from the system schema or database "
+                    f"'{qualifier}', which is not permitted"
+                )
+        if (
+            bare.startswith("pg_")
+            or bare.startswith("sqlite_")
+            or bare in _SYSTEM_TABLES
+        ):
             raise UnsafeQuery(
                 f"the query reads the system table '{table}', which is not permitted"
             )
@@ -230,16 +289,56 @@ def check_tables(
     return tables
 
 
-def enforce_limit(sql: str, max_rows: int) -> tuple[str, int | None]:
+def _main_select_index(masked: str) -> int | None:
     """
-    Append a LIMIT when the query has none.
+    Offset of the statement's outermost SELECT.
 
-    A report query without a bound is the difference between a slow morning
-    and an incident, and the model omits it more often than you would like.
+    For a plain query that is the first token. For ``WITH x AS (...) SELECT``
+    the CTE bodies sit inside parentheses, so the first SELECT at paren depth
+    zero is still the main one.
     """
-    if _LIMIT_PRESENT.search(_mask(sql)):
+    depth = 0
+    for index, character in enumerate(masked):
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and character in "sS":
+            match = _SELECT_TOKEN.match(masked, index)
+            if match:
+                return index
+    return None
+
+
+def enforce_limit(
+    sql: str, max_rows: int, dialect: str = "postgresql"
+) -> tuple[str, int | None]:
+    """
+    Bound the row count when the query does not bound itself.
+
+    A report query without a limit is the difference between a slow morning
+    and an incident, and the model omits one more often than you would like.
+
+    The syntax is not portable: PostgreSQL and MySQL take a trailing
+    ``LIMIT n``, SQL Server takes ``TOP (n)`` immediately after SELECT.
+    Emitting the wrong one does not degrade gracefully - it is a syntax
+    error, and every generated query would fail.
+    """
+    masked = _mask(sql)
+    if _LIMIT_PRESENT.search(masked):
         return sql, None
+
     trimmed = sql.rstrip().rstrip(";")
+
+    if dialect in {"mssql", "sqlserver"}:
+        index = _main_select_index(_mask(trimmed))
+        if index is None:
+            # Nothing recognisable to inject into. The fetch cap in the data
+            # source still bounds the result, so this is a note, not a fault.
+            return trimmed, None
+        insert_at = index + len("select")
+        return f"{trimmed[:insert_at]} TOP ({max_rows}){trimmed[insert_at:]}", max_rows
+
     return f"{trimmed}\nLIMIT {max_rows}", max_rows
 
 
@@ -257,7 +356,9 @@ def validate(sql: str, settings: ReportSettings | None = None) -> GuardResult:
     tables = check_tables(body, settings)
 
     notes: list[str] = []
-    safe_sql, limit_applied = enforce_limit(sql.strip().rstrip(";"), settings.max_rows)
+    safe_sql, limit_applied = enforce_limit(
+        sql.strip().rstrip(";"), settings.max_rows, settings.sql_dialect
+    )
     if limit_applied:
         notes.append(
             f"no row limit was specified, so LIMIT {limit_applied} was added"

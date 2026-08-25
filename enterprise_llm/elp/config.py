@@ -199,6 +199,33 @@ class ReportSettings(BaseModel):
     namis_auth_header: str = "Authorization"
     namis_auth_type: Literal["none", "bearer", "api_key"] = "bearer"
 
+    # NAMIS is Microsoft SQL Server. The dialect decides row-limit syntax
+    # (TOP vs LIMIT) and how read-only is enforced, so getting it wrong is a
+    # syntax error on every generated query, not a subtle degradation.
+    sql_dialect: Literal["mssql", "postgresql", "mysql"] = "mssql"
+
+    # SQL Server application role. Leave BOTH empty to query as the
+    # connecting login, which is the better posture where the service
+    # account has its own SELECT rights.
+    namis_app_role: str = ""
+    namis_app_role_env_var: str = "NAMIS_APP_ROLE_PASSWORD"
+
+    # Reporting against a live OLTP system takes shared locks that can block
+    # the people using it. READ COMMITTED is correct but can queue behind
+    # writers; SNAPSHOT is ideal where the DBA has enabled it; READ
+    # UNCOMMITTED never blocks but permits dirty reads, which is a poor
+    # trade for maintenance records.
+    mssql_isolation_level: Literal[
+        "READ COMMITTED", "SNAPSHOT", "READ UNCOMMITTED"
+    ] = "READ COMMITTED"
+
+    # Path to the NAMIS field catalog exported by the report generator.
+    catalog_path: str = str(BASE_DIR / "config" / "namis-catalog.json")
+    # Tables offered to the model for any one request. The catalogue holds
+    # hundreds; the whole schema does not fit in a prompt and would drown
+    # the relevant tables anyway.
+    catalog_tables_per_request: int = 18
+
     # --- Query safety ------------------------------------------------
     # Schemas and tables the reporting account may read. Empty means "any
     # table the database account can see", which is only acceptable when

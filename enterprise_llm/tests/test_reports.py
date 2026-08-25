@@ -297,7 +297,7 @@ def test_no_write_statement_can_reach_the_database(open_settings=None):
     from elp.config import ReportSettings
     from elp.reports.sqlguard import UnsafeQuery, validate
 
-    settings = ReportSettings()
+    settings = ReportSettings(sql_dialect="postgresql")
     writes = [
         "INSERT INTO work_orders (id) VALUES (1)",
         "UPDATE work_orders SET status = 'CLOSED'",
