@@ -114,18 +114,102 @@ class SqlNamisSource(NamisSource):
             dsn = dsn.replace("${PASSWORD}", password)
         return dsn
 
+    def _connect_args(self, dsn: str) -> dict:
+        """
+        Driver options that make the connection read-only at the server.
+
+        This is stronger than the per-transaction ``SET TRANSACTION READ
+        ONLY`` below: ``default_transaction_read_only`` applies to every
+        transaction on the connection, so even a code path that forgot to
+        set it cannot write. Both are belt and braces around the real
+        control, which is that the NAMIS account has SELECT and nothing else.
+
+        ``application_name`` is a courtesy to whoever runs NAMIS: this
+        traffic is identifiable in pg_stat_activity.
+        """
+        if "asyncpg" in dsn:
+            return {
+                "server_settings": {
+                    "default_transaction_read_only": "on",
+                    "application_name": "elp-reports",
+                }
+            }
+        if "psycopg" in dsn:
+            return {
+                "options": "-c default_transaction_read_only=on",
+                "application_name": "elp-reports",
+            }
+        return {}
+
     def engine(self) -> AsyncEngine:
         if self._engine is None:
+            dsn = self._dsn()
             self._engine = create_async_engine(
-                self._dsn(),
+                dsn,
                 pool_size=3,
                 max_overflow=2,
                 pool_pre_ping=True,
                 # Reports are infrequent; holding connections open against a
                 # production system all day is rude.
                 pool_recycle=1800,
+                connect_args=self._connect_args(dsn),
             )
         return self._engine
+
+    async def verify_read_only(self) -> dict:
+        """
+        Prove the account cannot write, rather than assuming it.
+
+        Attempts a harmless write (a temporary table) and expects the server
+        to refuse. If it succeeds, the connection is NOT read-only and the
+        result says so loudly - that is a provisioning problem no amount of
+        application-level validation makes safe.
+
+        Run at commissioning and from ``/v1/health/deep``.
+        """
+        probe = "CREATE TEMP TABLE _elp_readonly_probe (x integer)"
+        try:
+            async with self.engine().connect() as connection:
+                if connection.dialect.name != "postgresql":
+                    return {
+                        "read_only": None,
+                        "detail": (
+                            f"cannot verify automatically on "
+                            f"{connection.dialect.name}; confirm the account has "
+                            "SELECT only"
+                        ),
+                    }
+                try:
+                    await connection.execute(text(probe))
+                except Exception as exc:
+                    await connection.rollback()
+                    message = str(exc).lower()
+                    if "read-only" in message or "read only" in message or "permission" in message:
+                        return {
+                            "read_only": True,
+                            "detail": "the server refused a write, as it should",
+                        }
+                    return {
+                        "read_only": None,
+                        "detail": f"the write probe failed for another reason: {exc}",
+                    }
+
+                # The write succeeded. That is the finding.
+                await connection.rollback()
+                log.error(
+                    "SECURITY: the NAMIS connection accepted a write. The account "
+                    "is not read-only. Fix this before running reports."
+                )
+                return {
+                    "read_only": False,
+                    "detail": (
+                        "the NAMIS connection ACCEPTED a write. The account is not "
+                        "read-only. Application-level validation is not a "
+                        "substitute - grant SELECT only."
+                    ),
+                }
+        except Exception as exc:
+            return {"read_only": None, "detail": f"could not run the probe: {exc}"}
 
     async def describe_schema(self, refresh: bool = False) -> list[TableInfo]:
         """
@@ -245,7 +329,16 @@ class SqlNamisSource(NamisSource):
             async with self.engine().connect() as connection:
                 await connection.execute(text("SELECT 1"))
             tables = await self.describe_schema()
-            return {"status": "ok", "kind": "sql", "tables_visible": len(tables)}
+            probe = await self.verify_read_only()
+            # A writable connection is a failed health check, not a note.
+            status = "error" if probe.get("read_only") is False else "ok"
+            return {
+                "status": status,
+                "kind": "sql",
+                "tables_visible": len(tables),
+                "read_only": probe.get("read_only"),
+                "read_only_detail": probe.get("detail", ""),
+            }
         except Exception as exc:
             return {"status": "error", "kind": "sql", "detail": str(exc)}
 

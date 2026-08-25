@@ -205,3 +205,111 @@ def test_an_empty_result_renders_without_error():
     assert "No rows returned" in to_markdown(empty, title="Nothing")
     assert "No rows returned" in to_html(empty, title="Nothing")
     validate_source(to_latex(empty, title="Nothing"))
+
+
+# ----------------------------------------------------------------------
+# Read-only guarantees
+# ----------------------------------------------------------------------
+
+def _datasource_ast():
+    import ast
+    from pathlib import Path
+
+    import elp.reports.datasource as module
+
+    return ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+
+
+def test_the_namis_datasource_never_commits():
+    """
+    Architectural guard.
+
+    Nothing in the NAMIS path may commit a transaction. This is asserted
+    against the source rather than trusted to review, because a future
+    change that adds a `commit()` here would be silent, plausible-looking,
+    and would turn a read-only integration into a writable one.
+    """
+    import ast
+
+    commits = [
+        node
+        for node in ast.walk(_datasource_ast())
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "commit"
+    ]
+    assert not commits, (
+        "elp/reports/datasource.py contains a commit() call. The NAMIS "
+        "connection is read-only and must never commit."
+    )
+
+
+def test_the_namis_datasource_rolls_back_after_reading():
+    """A read-only query still opens a transaction; it must be closed."""
+    import ast
+
+    rollbacks = [
+        node
+        for node in ast.walk(_datasource_ast())
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "rollback"
+    ]
+    assert rollbacks, "the NAMIS query path should roll back rather than commit"
+
+
+def test_the_connection_is_read_only_at_the_server():
+    """
+    The strongest layer that application code controls.
+
+    `default_transaction_read_only` applies to every transaction on the
+    connection, so a code path that forgets the per-transaction SET still
+    cannot write.
+    """
+    from elp.reports.datasource import SqlNamisSource
+
+    source = SqlNamisSource()
+    asyncpg_args = source._connect_args(
+        "postgresql+asyncpg://u:p@host/db"
+    )
+    assert (
+        asyncpg_args["server_settings"]["default_transaction_read_only"] == "on"
+    )
+
+    psycopg_args = source._connect_args("postgresql+psycopg://u:p@host/db")
+    assert "default_transaction_read_only=on" in psycopg_args["options"]
+
+
+def test_namis_traffic_is_identifiable_to_a_dba():
+    """pg_stat_activity should show who is querying."""
+    from elp.reports.datasource import SqlNamisSource
+
+    args = SqlNamisSource()._connect_args("postgresql+asyncpg://u:p@host/db")
+    assert args["server_settings"]["application_name"] == "elp-reports"
+
+
+def test_no_write_statement_can_reach_the_database(open_settings=None):
+    """
+    End-to-end statement of the property, at the layer that filters.
+
+    Every one of these is refused before a connection is even opened.
+    """
+    from elp.config import ReportSettings
+    from elp.reports.sqlguard import UnsafeQuery, validate
+
+    settings = ReportSettings()
+    writes = [
+        "INSERT INTO work_orders (id) VALUES (1)",
+        "UPDATE work_orders SET status = 'CLOSED'",
+        "DELETE FROM work_orders",
+        "TRUNCATE work_orders",
+        "DROP TABLE work_orders",
+        "ALTER TABLE work_orders ADD COLUMN x int",
+        "CREATE TABLE evil (x int)",
+        "SELECT * INTO evil FROM work_orders",
+        "SELECT 1; UPDATE work_orders SET status = 'X'",
+        "GRANT ALL ON work_orders TO PUBLIC",
+    ]
+    for statement in writes:
+        with pytest.raises(UnsafeQuery):
+            validate(statement, settings)

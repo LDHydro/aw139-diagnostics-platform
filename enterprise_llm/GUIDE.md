@@ -406,7 +406,22 @@ ELP_REPORTS__ALLOWED_SCHEMAS=["namis"]
 ELP_REPORTS__ALLOWED_TABLES=[]        # tighten once you know what is used
 ```
 
-**Checkpoint** — confirm the platform can see the schema:
+**Checkpoint 1 — prove the account cannot write.** Do this before anyone
+saves a report. The platform attempts a write and expects NAMIS to refuse:
+
+```bash
+curl -s .../v1/health/deep -H "X-API-Key: $ADMIN_KEY" \
+  | python -c "import json,sys; print(json.load(sys.stdin)['components']['namis'])"
+```
+
+- `'read_only': True` — correct, carry on.
+- `'read_only': False` — **stop.** The account can write to production. No
+  amount of application-level validation makes that safe. Get the grant
+  fixed before going further.
+- `'read_only': None` — the probe could not run (a non-PostgreSQL NAMIS, or
+  the connection failed). Confirm the grant manually with your DBA.
+
+**Checkpoint 2** — confirm the platform can see the schema:
 
 ```bash
 curl -s .../v1/reports/schema -H "X-API-Key: $KEY" | python -m json.tool | head -40
@@ -614,6 +629,8 @@ artifacts are disposable.
 | Category A item has no expiry | Interval stated in flight hours or cycles, not days | Enter the day limit manually; the platform will not convert |
 | Extension refused | Category A, already extended, or already expired | All three are correct refusals — an extension is granted before the limit, not after |
 | `NAMIS is not configured` | `ELP_REPORTS__NAMIS_KIND` still `disabled` | Set it to `sql` or `rest` and supply the DSN |
+| `read_only: false` in health/deep | The reporting account can write to production | Stop and fix the grant. `REVOKE` everything but `SELECT` |
+| `read_only: null` | Probe could not run (non-PostgreSQL, or connection failed) | Verify the grant manually with your DBA |
 | `/v1/reports/schema` returns no tables | The account cannot see them, or the allowlist excludes them | Check the account's grants first, then `ELP_REPORTS__ALLOWED_TABLES` |
 | Draft query rejected as unsafe | Working as intended — read the rejection | It names the exact construct; rephrase the request or widen the allowlist |
 | Report numbers look wrong | Almost always the query, not the database | Read `assumptions` on the draft; re-draft with the ambiguity spelled out |
@@ -767,8 +784,10 @@ new tests.
 reports on a timer instead of a person's calendar reminder.
 **Watch out for:**
 - **The read-only NAMIS account is the control that matters.** The SQL guard,
-  the read-only transaction and the statement timeout are defence in depth.
+  the read-only connection and the statement timeout are defence in depth.
   Do not treat them as a substitute for provisioning the account correctly.
+  `/v1/health/deep` proves it by attempting a write; check it at
+  commissioning and after any NAMIS credential change.
 - Approval binds to a fingerprint of the query text. Editing a scheduled
   report's query revokes approval and stops the schedule — by design. If a
   report "stopped arriving", check `approval_current` first.

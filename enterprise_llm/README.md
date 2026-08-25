@@ -443,16 +443,39 @@ fingerprint stops matching: the report drops back to draft and the schedule
 stops firing until someone approves it again. That is what stops "just a small
 tweak" from putting an unreviewed query on a nightly timer.
 
-**Query safety is layered**, because any single layer can be defeated:
+### Nothing is ever written to NAMIS
+
+The platform **pulls data with SELECT and builds the report itself.** No
+write reaches the production system, by four independent layers:
 
 1. **The NAMIS account is read-only.** This is the layer that actually holds.
-   Provision it correctly; everything below catches mistakes before they reach
-   it.
-2. **The transaction is opened READ ONLY** with a statement timeout.
+   Provision it with `SELECT` and nothing else; everything below catches
+   mistakes before they reach it.
+2. **The connection is read-only at the server.**
+   `default_transaction_read_only=on` is set as a connection parameter, so
+   *every* transaction is read-only regardless of what application code does,
+   and each query additionally opens with `SET TRANSACTION READ ONLY` and a
+   statement timeout.
 3. **The statement is validated** — single statement, SELECT/WITH only, no
    DDL, DML, `SELECT … INTO`, system catalogues, or file/network functions,
-   and every table checked against an allowlist.
-4. **A LIMIT is enforced** when the query omits one.
+   and every table checked against an allowlist. A LIMIT is enforced when the
+   query omits one.
+4. **The query path never commits.** It rolls back after reading, and a test
+   asserts against the source that no `commit()` call exists in the NAMIS
+   module — so a future change cannot quietly make the integration writable.
+
+Everything after the SELECT — narration, tables, formatting, PDF — happens on
+the platform, from the rows already pulled. NAMIS is only ever read.
+
+**Verify it rather than trust it.** `/v1/health/deep` runs a probe that
+attempts a write and expects the server to refuse. A connection that accepts
+the write is reported as a **failed** health check, not a warning:
+
+```bash
+curl -s .../v1/health/deep -H "X-API-Key: $ADMIN" | python -c \
+  "import json,sys; print(json.load(sys.stdin)['components']['namis'])"
+# {'status': 'ok', 'read_only': True, 'read_only_detail': 'the server refused a write, as it should'}
+```
 
 The validator works on a comment-stripped, literal-masked copy, so keywords
 hidden in comments or strings cannot smuggle anything past it — and a

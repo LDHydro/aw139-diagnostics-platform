@@ -280,6 +280,69 @@ def main() -> int:
     except Exception as exc:
         report("MEL fleet dispatch status", FAIL, str(exc))
 
+    # --- Reporting -----------------------------------------------------------
+    try:
+        r = client.get("/v1/reports/schema")
+        if r.status_code == 200:
+            schema = r.json()
+            report(
+                "NAMIS connection",
+                PASS if schema["table_count"] else WARN,
+                f"{schema['table_count']} table(s) visible to the reporting account",
+            )
+        elif r.status_code == 503:
+            report("NAMIS connection", WARN, str(r.json().get("detail"))[:90])
+        elif r.status_code == 403:
+            report("NAMIS connection", WARN, "credential lacks the reports scope")
+        else:
+            report("NAMIS connection", FAIL, f"{r.status_code}: {r.text[:150]}")
+    except Exception as exc:
+        report("NAMIS connection", FAIL, str(exc))
+
+    # The single most important check in the reporting path: prove the
+    # account cannot write, rather than assuming it.
+    try:
+        r = client.get("/v1/health/deep")
+        if r.status_code == 200:
+            namis = (r.json().get("components") or {}).get("namis") or {}
+            read_only = namis.get("read_only")
+            if read_only is True:
+                report("NAMIS is read-only", PASS, namis.get("read_only_detail", ""))
+            elif read_only is False:
+                report(
+                    "NAMIS is read-only",
+                    FAIL,
+                    "THE REPORTING ACCOUNT CAN WRITE TO NAMIS. Grant SELECT only "
+                    "before running any report.",
+                )
+            elif namis:
+                report("NAMIS is read-only", WARN, namis.get("read_only_detail", "not verified"))
+        elif r.status_code == 403:
+            report("NAMIS is read-only", WARN, "needs an admin credential; skipped")
+    except Exception as exc:
+        report("NAMIS is read-only", FAIL, str(exc))
+
+    try:
+        r = client.get("/v1/reports")
+        if r.status_code == 200:
+            reports = r.json()
+            scheduled = [x for x in reports if x.get("schedule_enabled")]
+            stale = [x for x in scheduled if not x.get("approval_current")]
+            report(
+                "saved reports",
+                FAIL if stale else PASS,
+                f"{len(reports)} saved, {len(scheduled)} scheduled"
+                + (
+                    f"; APPROVAL LAPSED (will not run): {[x['name'] for x in stale]}"
+                    if stale
+                    else ""
+                ),
+            )
+        elif r.status_code != 403:
+            report("saved reports", FAIL, f"{r.status_code}: {r.text[:150]}")
+    except Exception as exc:
+        report("saved reports", FAIL, str(exc))
+
     # --- LaTeX -------------------------------------------------------------
     try:
         r = client.post(

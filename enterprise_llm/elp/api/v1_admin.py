@@ -302,12 +302,25 @@ async def deep_health(
     reranker = await get_rerank_client().health()
     peers = await get_orchestrator().health(session)
 
+    # Includes the read-only probe: a NAMIS connection that accepts a write
+    # is a failed health check, not a note in a log.
+    try:
+        from ..reports.datasource import DataSourceError, get_source
+
+        try:
+            namis = await get_source().health()
+        except DataSourceError as exc:
+            namis = {"status": "disabled", "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        namis = {"status": "error", "detail": str(exc)}
+
     components = {
         "database": database,
         "models": models,
         "embeddings": embeddings,
         "reranker": reranker,
         "peers": peers,
+        "namis": namis,
     }
     degraded = [
         name
