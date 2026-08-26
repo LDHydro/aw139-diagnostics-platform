@@ -121,6 +121,99 @@ def _run_summary(run: ReportRun) -> ReportRunSummary:
     )
 
 
+async def _plan_report(
+    request_text: str, mode: str
+) -> ReportDraftResponse:
+    """
+    Plan a report, preferring a definition over free-form SQL.
+
+    Structured first because the model is an untrusted suggester and the
+    compiler is the gatekeeper: a hallucinated column becomes a rejection
+    rather than a query. Free-form SQL is the fallback for requests the
+    definition model cannot express - window functions, unions, anything
+    needing SQL the compiler does not emit.
+    """
+    from ..reports.authoring import draft_structured
+    from ..reports.catalog import get_catalog
+
+    catalog = get_catalog()
+    fell_back = False
+    structured_rejection = ""
+
+    if mode in {"auto", "structured"} and catalog is not None and len(catalog):
+        planned = await draft_structured(request_text, catalog)
+        if planned.valid and planned.report is not None:
+            return ReportDraftResponse(
+                request_text=request_text,
+                query_language="structured",
+                query=planned.sql,
+                definition=planned.report.to_dict(),
+                explanation=planned.explanation,
+                assumptions=planned.assumptions,
+                tables=planned.tables,
+                tables_offered=planned.tables_offered,
+                columns=planned.columns,
+                valid=True,
+                repaired=planned.repaired,
+                warnings=planned.warnings,
+            )
+        structured_rejection = planned.rejection
+        if mode == "structured":
+            return ReportDraftResponse(
+                request_text=request_text,
+                query_language="structured",
+                query="",
+                definition=planned.report.to_dict() if planned.report else None,
+                explanation=planned.explanation,
+                assumptions=planned.assumptions,
+                tables_offered=planned.tables_offered,
+                valid=False,
+                rejection=planned.rejection,
+                repaired=planned.repaired,
+            )
+        fell_back = True
+        log.info(
+            "structured planning did not compile (%s); falling back to SQL",
+            structured_rejection,
+        )
+    elif mode == "structured":
+        return ReportDraftResponse(
+            request_text=request_text,
+            query_language="structured",
+            query="",
+            valid=False,
+            rejection=(
+                "structured planning needs the NAMIS catalogue; set "
+                "ELP_REPORTS__CATALOG_PATH"
+            ),
+        )
+
+    tables = await _schema_tables()
+    result = await draft_query(request_text, tables)
+    warnings = list(result.warnings)
+    if fell_back and structured_rejection:
+        warnings.append(
+            "a structured definition could not be produced "
+            f"({structured_rejection}); this is free-form SQL and needs a "
+            "closer read before approval"
+        )
+
+    return ReportDraftResponse(
+        request_text=request_text,
+        query_language="sql",
+        query=result.query,
+        explanation=result.explanation,
+        assumptions=result.assumptions,
+        tables=result.tables,
+        tables_offered=result.tables_offered,
+        valid=result.valid,
+        rejection=result.rejection,
+        repaired=result.repaired,
+        fell_back_to_sql=fell_back,
+        warnings=warnings,
+    )
+
+
 async def _schema_tables():
     try:
         return await get_source().describe_schema()
@@ -172,9 +265,8 @@ async def draft(
     where the model tells you what it had to guess, and they are usually the
     difference between the report you wanted and the one you asked for.
     """
-    tables = await _schema_tables()
     try:
-        result = await draft_query(payload.request_text, tables)
+        response = await _plan_report(payload.request_text, payload.mode)
     except InferenceError as exc:
         raise HTTPException(
             status_code=503, detail=f"the local model is not reachable: {exc}"
@@ -187,26 +279,17 @@ async def draft(
         principal,
         "reports.draft",
         resource=payload.request_text[:300],
-        outcome="ok" if result.valid else "rejected",
+        outcome="ok" if response.valid else "rejected",
         request=request,
         detail={
-            "tables": result.tables,
-            "valid": result.valid,
-            "rejection": result.rejection,
+            "query_language": response.query_language,
+            "tables": response.tables,
+            "valid": response.valid,
+            "rejection": response.rejection,
+            "fell_back_to_sql": response.fell_back_to_sql,
         },
     )
-
-    return ReportDraftResponse(
-        request_text=payload.request_text,
-        query=result.query,
-        explanation=result.explanation,
-        assumptions=result.assumptions,
-        tables=result.tables,
-        valid=result.valid,
-        rejection=result.rejection,
-        repaired=result.repaired,
-        warnings=result.warnings,
-    )
+    return response
 
 
 @router.post("/ask")
@@ -223,9 +306,10 @@ async def ask(
     schedule: the caller is authenticated, the query is read-only and
     row-limited, and a person is looking at the result.
     """
-    tables = await _schema_tables()
+    import json as _json
+
     try:
-        drafted = await draft_query(payload.request_text, tables)
+        drafted = await _plan_report(payload.request_text, payload.mode)
     except InferenceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -237,7 +321,7 @@ async def ask(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"a safe query could not be produced for that request: "
+                f"a report could not be produced for that request: "
                 f"{drafted.rejection}"
             ),
         )
@@ -246,7 +330,12 @@ async def ask(
     definition = ReportDefinition(
         name=f"Ad-hoc: {payload.request_text[:80]}",
         request_text=payload.request_text,
-        query=drafted.query,
+        query_language=drafted.query_language,
+        query=(
+            _json.dumps(drafted.definition)
+            if drafted.query_language == "structured"
+            else drafted.query
+        ),
         output_formats=payload.output_formats,
         narrative=payload.narrative,
         owner=principal.subject,
@@ -264,14 +353,21 @@ async def ask(
         resource=payload.request_text[:300],
         outcome=run.status,
         request=request,
-        detail={"rows": run.row_count, "tables": drafted.tables},
+        detail={
+            "rows": run.row_count,
+            "tables": drafted.tables,
+            "query_language": drafted.query_language,
+        },
     )
 
     return {
         "request_text": payload.request_text,
+        "query_language": drafted.query_language,
         "query": drafted.query,
+        "definition": drafted.definition,
         "explanation": drafted.explanation,
         "assumptions": drafted.assumptions,
+        "warnings": drafted.warnings,
         "run": _run_summary(run).model_dump(mode="json"),
         "definition_id": definition.id,
         "note": (

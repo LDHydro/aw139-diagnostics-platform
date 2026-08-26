@@ -545,6 +545,29 @@ better posture. Where it is used, the platform holds the credential
 server-side in a root-owned file — which is what security finding F-1's
 remediation asks for, and the opposite of shipping it inside client binaries.
 
+### The model plans, the compiler decides
+
+`POST /v1/reports/draft` and `/ask` plan a report as a **definition**, not as
+SQL. The platform compiles it. This mirrors what the existing NAMIS generator
+does — *"the model returns a definition, never SQL; the AI is an untrusted
+suggester"* — and the two arrived at it independently.
+
+```
+request → catalogue selects ~18 relevant tables → model returns a definition
+        → compiler validates every name against the catalogue
+        → parameterised T-SQL, or a rejection precise enough to repair from
+```
+
+A hallucinated column cannot become a query. It becomes
+`'WorkRequest' has no column 'Status'. Did you mean: StatusCd?` — which is fed
+straight back for one repair round, and usually fixes it. If it still does not
+compile, nothing runs.
+
+`mode` chooses the path: `auto` (default — plan, fall back to SQL if the
+definition model cannot express the request), `structured`, or `sql`. When
+`auto` falls back, the response says so and the answer carries a warning that
+it needs a closer read before approval.
+
 ### Structured reports: no injection surface at all
 
 Reports can be defined **structurally** — base table, fields, joins, filters,

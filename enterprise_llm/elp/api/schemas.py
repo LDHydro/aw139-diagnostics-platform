@@ -385,17 +385,29 @@ class MelExtendRequest(BaseModel):
 
 class ReportDraftRequest(BaseModel):
     request_text: str = Field(..., min_length=5, max_length=4000)
+    # "auto" plans a definition and falls back to SQL if that cannot be made
+    # to compile; "structured" and "sql" force one path.
+    mode: Literal["auto", "structured", "sql"] = "auto"
 
 
 class ReportDraftResponse(BaseModel):
     request_text: str
+    # Which path produced this: "structured" (a definition the platform
+    # compiled) or "sql" (free-form, validated by the guard).
+    query_language: Literal["structured", "sql"] = "sql"
+    # The compiled or authored SQL, for review.
     query: str
+    # Present for structured drafts: save this as the report's query.
+    definition: dict | None = None
     explanation: str = ""
     assumptions: list[str] = Field(default_factory=list)
     tables: list[str] = Field(default_factory=list)
+    tables_offered: list[str] = Field(default_factory=list)
+    columns: list[str] = Field(default_factory=list)
     valid: bool = False
     rejection: str = ""
     repaired: bool = False
+    fell_back_to_sql: bool = False
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -403,6 +415,7 @@ class ReportAskRequest(BaseModel):
     """One-shot ad-hoc report: draft, run and return, without saving."""
 
     request_text: str = Field(..., min_length=5, max_length=4000)
+    mode: Literal["auto", "structured", "sql"] = "auto"
     output_formats: list[str] = Field(default_factory=lambda: ["markdown"])
     narrative: bool = True
 

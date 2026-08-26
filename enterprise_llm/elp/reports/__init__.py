@@ -1,6 +1,13 @@
 """Operational reporting against NAMIS, driven by plain-language requests."""
 
-from .authoring import QueryDraft, draft_query, narrate
+from .authoring import (
+    QueryDraft,
+    StructuredDraft,
+    draft_query,
+    draft_structured,
+    narrate,
+    parse_structured_response,
+)
 from .catalog import NamisCatalog, TableSpec, get_catalog, load_catalog
 from .cron import CronError, describe, is_due, next_run, parse
 from .datasource import (
@@ -59,6 +66,7 @@ __all__ = [
     "GuardResult",
     "NamisSource",
     "QueryDraft",
+    "StructuredDraft",
     "QueryResult",
     "ReportError",
     "TableInfo",
@@ -69,6 +77,7 @@ __all__ = [
     "create_definition",
     "describe",
     "draft_query",
+    "draft_structured",
     "due_definitions",
     "execute",
     "fingerprint",
@@ -80,6 +89,7 @@ __all__ = [
     "list_definitions",
     "list_runs",
     "narrate",
+    "parse_structured_response",
     "next_run",
     "parse",
     "prune_runs",

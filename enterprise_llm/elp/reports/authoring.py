@@ -18,6 +18,7 @@ Numbers in a report that nobody can reproduce are worse than no report.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from ..llm.client import ChatMessage
 from ..llm.router import TaskKind, get_router
 from .datasource import QueryResult, TableInfo, render_schema_catalogue
 from .sqlguard import UnsafeQuery, validate
+from .structured import ReportSpecError, StructuredReport, compile_report
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +118,102 @@ the table. The reader can see the table.
 - If nothing in the data warrants attention, say so plainly in one sentence.
 - No preamble, no "here is your report", no closing pleasantries.
 - Three short paragraphs at most."""
+
+
+_STRUCTURED_PROMPT = """\
+You plan operational reports over the NAMIS aviation maintenance database.
+
+You do NOT write SQL. You return a report *definition*, which this platform \
+validates against the schema catalogue and compiles into parameterised T-SQL \
+itself. A definition that names a table or column which does not exist is \
+rejected outright, so use only what is listed below.
+
+SCHEMA — the only tables and columns that exist for this request
+{schema}
+
+FILTER OPERATORS
+  eq ne gt gte lt lte            compare to "value"
+  contains starts_with ends_with text match on "value" (no wildcards needed)
+  in not_in                     match any of "values": [...]
+  between                       "values": [low, high]
+  is_null not_null              no value
+  is_true is_false              for bit columns
+  last_n_days next_n_days older_than_days
+                                "value" is a NUMBER OF DAYS, applied to a
+                                date column. Prefer these over hard-coded
+                                dates so the report stays correct next month.
+
+AGGREGATES (optional per field): count, count_distinct, sum, avg, min, max.
+Using any aggregate groups the report by every non-aggregated field.
+
+RETURN ONE JSON OBJECT, nothing else — no prose, no code fences:
+
+{{
+  "definition": {{
+    "base_table": "<table>",
+    "fields": [
+      {{"table": "<table>", "column": "<column>",
+        "alias": "<human-readable heading>", "aggregate": ""}}
+    ],
+    "joins": [
+      {{"table": "<table to add>", "kind": "left|inner",
+        "on": [{{"left_table": "<table already in the report>",
+                "left_column": "<column>",
+                "right_table": "<table being added>",
+                "right_column": "<column>"}}]}}
+    ],
+    "filters": [
+      {{"table": "<table>", "column": "<column>", "op": "<operator>",
+        "value": <value>, "values": []}}
+    ],
+    "filter_logic": "and",
+    "sort": [{{"table": "<table>", "column": "<column>",
+              "direction": "asc|desc"}}],
+    "row_limit": 500
+  }},
+  "explanation": "<two or three sentences, plain language>",
+  "assumptions": ["<one per assumption you had to make>"]
+}}
+
+RULES
+- Every table used in fields, filters or sort must be the base table or one \
+you have joined.
+- Use the KNOWN JOINS exactly as given. Where a join lists several column \
+pairs it is a compound key — include every pair, or the result is a \
+cartesian product that looks like real data.
+- If a join is marked INFERRED, say so in "assumptions".
+- Always give a sort order.
+- Alias every field with a heading operations staff would recognise.
+- If the request cannot be answered from these tables, return a definition \
+with an empty "fields" list and explain why."""
+
+_STRUCTURED_REPAIR = """\
+The definition you returned was rejected when it was compiled.
+
+REJECTION: {error}
+
+Return a corrected JSON object in the same shape. The rejection names the \
+exact problem — fix that, do not restructure the rest. If the request truly \
+cannot be satisfied from the tables listed, return an empty "fields" list \
+and say why in "explanation"."""
+
+
+@dataclass
+class StructuredDraft:
+    """A planned report definition, and the SQL it compiles to."""
+
+    report: StructuredReport | None = None
+    explanation: str = ""
+    assumptions: list[str] = field(default_factory=list)
+    sql: str = ""
+    parameters: dict = field(default_factory=dict)
+    columns: list[str] = field(default_factory=list)
+    tables: list[str] = field(default_factory=list)
+    tables_offered: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    valid: bool = False
+    rejection: str = ""
+    repaired: bool = False
 
 
 @dataclass
@@ -314,3 +412,149 @@ async def narrate(
         max_tokens=profile.max_tokens,
     )
     return completion.text.strip()
+
+
+# ----------------------------------------------------------------------
+# Planning a structured definition
+# ----------------------------------------------------------------------
+
+_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def parse_structured_response(text: str) -> tuple[dict, str, list[str]]:
+    """
+    Pull the definition, explanation and assumptions out of a reply.
+
+    Models wrap JSON in code fences and add a sentence of preamble however
+    firmly they are told not to, so the object is located rather than
+    assumed to be the whole response.
+    """
+    cleaned = _strip_fences(text)
+    match = _JSON_OBJECT.search(cleaned)
+    if match is None:
+        raise ValueError("the reply contained no JSON object")
+
+    try:
+        payload = json.loads(match.group())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"the reply was not valid JSON: {exc}") from exc
+
+    definition = payload.get("definition")
+    if not isinstance(definition, dict):
+        # Some replies return the definition at the top level.
+        definition = payload if "base_table" in payload or "table" in payload else {}
+    if not isinstance(definition, dict) or not definition:
+        raise ValueError("the reply contained no report definition")
+
+    assumptions = payload.get("assumptions") or []
+    if isinstance(assumptions, str):
+        assumptions = [assumptions]
+
+    return (
+        definition,
+        str(payload.get("explanation", "")),
+        [str(a) for a in assumptions if str(a).strip()],
+    )
+
+
+async def draft_structured(
+    request_text: str,
+    catalog,
+    *,
+    settings: ReportSettings | None = None,
+    repair_attempts: int = 1,
+) -> StructuredDraft:
+    """
+    Plan a report as a definition rather than as SQL.
+
+    This is the safer of the two authoring paths, and the one the existing
+    NAMIS generator uses: the model is an untrusted suggester, and the
+    compiler is the gatekeeper. A hallucinated column cannot become a query
+    - it becomes a rejection, with a message precise enough to repair from
+    ("'WorkRequest' has no column 'Status'. Did you mean: StatusCd?").
+    """
+    settings = settings or get_settings().reports
+
+    chosen = catalog.select_for_request(
+        request_text, limit=settings.catalog_tables_per_request
+    )
+    if not chosen:
+        return StructuredDraft(
+            rejection=(
+                "no tables in the NAMIS catalogue match that request. Try naming "
+                "the system or the record type - work requests, inspections, "
+                "flight records, fuel."
+            )
+        )
+
+    schema = catalog.render_for_prompt(chosen)
+    offered = [table.name for table in chosen]
+    log.info(
+        "planning a structured report over %d catalogued table(s): %s",
+        len(chosen), ", ".join(offered[:8]),
+    )
+
+    client, profile = get_router().resolve(TaskKind.CODE)
+    messages = [
+        ChatMessage("system", _STRUCTURED_PROMPT.format(schema=schema)),
+        ChatMessage("user", f"REPORT REQUEST\n{request_text}"),
+    ]
+
+    draft = StructuredDraft(tables_offered=offered)
+
+    for attempt in range(repair_attempts + 1):
+        completion = await client.chat(
+            messages, temperature=0.0, max_tokens=profile.max_tokens
+        )
+        draft.repaired = attempt > 0
+
+        try:
+            definition, explanation, assumptions = parse_structured_response(
+                completion.text
+            )
+        except ValueError as exc:
+            draft.rejection = str(exc)
+            if attempt < repair_attempts:
+                messages.append(ChatMessage("assistant", completion.text))
+                messages.append(
+                    ChatMessage("user", _STRUCTURED_REPAIR.format(error=exc))
+                )
+                continue
+            return draft
+
+        draft.explanation = explanation
+        draft.assumptions = assumptions
+
+        report = StructuredReport.from_dict(definition)
+        if not report.fields:
+            draft.report = report
+            draft.rejection = (
+                explanation
+                or "the request cannot be answered from the tables available"
+            )
+            return draft
+
+        try:
+            compiled = compile_report(report, catalog, max_rows=settings.max_rows)
+        except ReportSpecError as exc:
+            draft.rejection = str(exc)
+            if attempt < repair_attempts:
+                log.info("planned definition rejected (%s); repairing", exc)
+                messages.append(ChatMessage("assistant", completion.text))
+                messages.append(
+                    ChatMessage("user", _STRUCTURED_REPAIR.format(error=exc))
+                )
+                continue
+            return draft
+
+        draft.report = report
+        draft.sql = compiled.sql
+        draft.parameters = compiled.parameters
+        draft.columns = compiled.columns
+        draft.tables = compiled.tables
+        draft.warnings = list(compiled.warnings)
+        draft.valid = True
+        draft.rejection = ""
+        return draft
+
+    return draft

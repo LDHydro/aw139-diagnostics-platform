@@ -816,6 +816,37 @@ remembering, or change how the platform is used. Newest at the top.
 **Watch out for:**
 -->
 
+### 2026-08-25 — The model now plans definitions, not SQL
+
+**Who:** initial build, following the generator's proven design
+**What changed:** `/v1/reports/draft` and `/ask` plan a report definition and
+compile it here, rather than asking the model for SQL. Free-form SQL is now
+the fallback, not the default.
+
+`mode` selects the path — `auto` (default), `structured`, `sql`. In `auto`,
+a request the definition model cannot express falls back to SQL and the
+response says so, with a warning that it needs a closer read before approval.
+
+**Why this is better than validating SQL.** The compiler resolves every
+identifier through the catalogue, so a hallucinated column raises before any
+SQL exists. Validating free-form SQL means proving a negative about a string
+the model wrote. The rejections are also good repair signals — a model told
+*"'WorkRequest' has no column 'Status'. Did you mean: StatusCd?"* fixes it on
+the next attempt, which a generic "invalid query" never would.
+
+**Watch out for:**
+- **Read the `assumptions` before approving.** That is where the model says
+  what it had to guess, and it is usually the difference between the report
+  you wanted and the one you asked for.
+- A draft that used an **INFERRED** join should say so in its assumptions —
+  224 of the 723 catalogue relationships are inferred rather than declared
+  foreign keys.
+- `fell_back_to_sql: true` in a draft response means the structured path did
+  not compile. That is a signal to read the SQL closely, not a routine
+  outcome.
+- Structured drafts still arrive as **drafts** and still need approval before
+  they can be scheduled.
+
 ### 2026-08-25 — Note on the credential in the handoff notes
 
 **Who:** noted while reading the NAMIS handoff notes, then corrected
