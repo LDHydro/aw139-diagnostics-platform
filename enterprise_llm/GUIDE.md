@@ -816,6 +816,60 @@ remembering, or change how the platform is used. Newest at the top.
 **Watch out for:**
 -->
 
+### 2026-08-26 — Token counting differed on an offline box
+
+**Who:** initial build, found by CI
+**What changed:** `count_tokens()` in `elp/rag/chunker.py` now behaves
+identically whether or not tiktoken is usable, and resolves its encoder once
+rather than on every call.
+
+**Why:** tiktoken does not ship its vocabulary. It downloads `cl100k_base`
+from the internet on first use and caches it on disk. So on a
+network-restricted box the counter silently falls back to a
+characters-per-four estimate — meaning the *same document* was being chunked
+differently depending on whether that download had ever succeeded. Every
+development run had taken the fallback path and nothing noticed until CI,
+which has internet, disagreed about the token count of an empty string.
+
+The second problem was worse than the wrong count. The old code called
+`get_encoding()` inside the per-call `try`, so on a box with no route out it
+paid a failed network fetch, with retries, for every sentence of every
+document. Ingesting a 500-page manual would have looked like a hang rather
+than a failure.
+
+**Watch out for:** **Decide deliberately which path this box uses, before
+ingesting anything.** Chunk boundaries are baked into the embeddings at
+ingest time, so switching paths later silently makes new chunks inconsistent
+with old ones, and you will not get an error — just slightly worse retrieval.
+
+To use the real tokenizer on a restricted network, pre-seed the cache from a
+machine that does have access:
+
+```bash
+# On a connected machine, with the same tiktoken version:
+python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+# The vocabulary lands in the tiktoken cache; copy that directory across, then
+# on the LLM box point tiktoken at it and make it permanent for the service:
+export TIKTOKEN_CACHE_DIR=/opt/elp/cache/tiktoken
+```
+
+Add that as an `Environment=` line in the systemd unit, not just to a login
+shell, or the service and your interactive testing will disagree.
+
+To confirm which path a box is actually on:
+
+```bash
+python -c "
+from elp.rag.chunker import _encoder, count_tokens
+print('real tokenizer' if _encoder() else 'fallback estimate', count_tokens('a short line'))
+"
+```
+
+Staying on the fallback is a legitimate choice — it is deliberately
+conservative, over-estimating so chunks come out slightly small rather than
+overrunning the model's context. Just make it a choice, and make it the same
+choice for the life of the corpus.
+
 ### 2026-08-26 — Ingest pipeline validated against the real manuals
 
 **Who:** initial build, run against AOM Rev 4, ATM Rev 4 and SOP Rev 1
