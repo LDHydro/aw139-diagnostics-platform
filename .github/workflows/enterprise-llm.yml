@@ -60,6 +60,11 @@ jobs:
           # dev brings pytest and ruff; excel brings openpyxl for the
           # spreadsheet export tests. vLLM and the ODBC driver are not
           # installed: nothing here talks to a model or a database.
+          #
+          # The 'ldap' extra is deliberately left out. ldap3 is imported
+          # lazily inside the one function that needs it, so a clean run
+          # here is also proof that the optional path stays optional and
+          # the app assembles without it.
           pip install -e ".[dev,excel]"
 
       - name: Lint
