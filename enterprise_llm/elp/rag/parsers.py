@@ -95,9 +95,16 @@ def parse_pdf(path: Path) -> ParsedDocument:
                 span_texts = []
                 for span in line.get("spans", []):
                     text = span.get("text", "")
+                    if not text:
+                        continue
+                    # Keep whitespace-only spans. Many PDF producers - LaTeX
+                    # among them - emit the space between two words as its
+                    # own span. Dropping those glues the words together
+                    # ("Sectiontitlechangedfrom"), which corrupts both the
+                    # embedding and the quoted text in a citation.
+                    span_texts.append(text)
                     if not text.strip():
                         continue
-                    span_texts.append(text)
                     max_size = max(max_size, span.get("size", 0.0))
                     # Bit 4 of the span flags marks a bold face.
                     if span.get("flags", 0) & 2 ** 4:

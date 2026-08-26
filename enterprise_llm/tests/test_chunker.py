@@ -116,3 +116,154 @@ def test_empty_input_produces_no_chunks(rag_settings):
 def test_token_counter_is_monotonic():
     assert count_tokens("") >= 1
     assert count_tokens("a short line") < count_tokens("a considerably longer line " * 20)
+
+
+# ----------------------------------------------------------------------
+# Document furniture
+#
+# These behaviours were all derived from running three real governing
+# manuals through the pipeline, where each was measurably degrading either
+# retrieval quality or citation accuracy.
+# ----------------------------------------------------------------------
+
+def test_contents_entries_are_not_indexed(rag_settings):
+    """
+    Retrieving a table-of-contents line returns a page number to someone
+    who asked a question. It also produces a near-duplicate of every real
+    heading, competing with the section it points at.
+    """
+    blocks = [
+        Block("Table of Contents", page=2, heading_level=1),
+        Block("1 General . . . . . . . . . . . . . . . 1", page=2),
+        Block("2 Training . . . . . . . . . . . . . . 12", page=2),
+        Block("3 Records . . . . . . . . . . . . . . 25", page=2),
+        Block("Appendices . . . . . . . . . . . . . . 40", page=2),
+        Block("Preamble . . . . . . . . . . . . . . . ii", page=2),
+        Block("1 General", page=10, heading_level=1),
+        Block("The department shall maintain currency records.", page=10),
+    ]
+    chunks = chunk_blocks(blocks, rag_settings)
+
+    body = " ".join(c.text for c in chunks)
+    assert "currency records" in body
+    assert "." * 4 not in body
+
+
+def test_running_headers_and_footers_are_stripped(rag_settings):
+    """
+    Page furniture is on every page and means nothing on any of them.
+    Left in, it is embedded hundreds of times and competes with content.
+    """
+    blocks = []
+    for page in range(1, 11):
+        blocks.append(Block("Remote Sensing Laboratory Training Manual", page=page))
+        blocks.append(Block("Revision 4 (DRAFT)", page=page))
+        blocks.append(Block(f"Unique body text for page {page}. " * 12, page=page))
+    chunks = chunk_blocks(blocks, rag_settings)
+
+    body = " ".join(c.text for c in chunks)
+    assert "Unique body text" in body
+    assert "Revision 4 (DRAFT)" not in body
+
+
+def test_a_repeated_phrase_in_real_content_is_kept(rag_settings):
+    """Furniture detection keys on repetition across pages, so genuine
+    content that happens to recur on two pages must survive."""
+    blocks = []
+    for page in range(1, 11):
+        blocks.append(Block(f"Body paragraph number {page}. " * 12, page=page))
+    blocks.append(Block("The commander shall approve all deviations.", page=3))
+    blocks.append(Block("The commander shall approve all deviations.", page=7))
+    chunks = chunk_blocks(blocks, rag_settings)
+
+    assert "commander shall approve" in " ".join(c.text for c in chunks)
+
+
+def test_a_lead_in_label_does_not_start_a_section(rag_settings):
+    """
+    "Objective:" and "References:" are field labels inside a procedure,
+    bold and short exactly like a heading. Treating each as a section
+    shreds the procedure into one-line fragments and attaches a
+    meaningless heading to every one.
+    """
+    blocks = [
+        Block("Lesson 1: Ground - Aircraft Systems", page=32, heading_level=2),
+        Block("Objective:", page=32, heading_level=3),
+        Block("Review King Air B350 aircraft systems.", page=32),
+        Block("Discussion topics:", page=32, heading_level=3),
+        Block("Fuel system, electrical system, powerplant.", page=32),
+        Block("Completion standards:", page=32, heading_level=3),
+        Block("Demonstrate systems knowledge to the instructor.", page=32),
+    ]
+    chunks = chunk_blocks(blocks, rag_settings)
+
+    assert len(chunks) == 1, "the lesson should stay in one retrievable piece"
+    assert chunks[0].heading.startswith("Lesson 1")
+    for label in ("Objective:", "Discussion topics:", "Completion standards:"):
+        assert label in chunks[0].text
+
+
+def test_a_revision_history_row_does_not_reassign_the_section(rag_settings):
+    """
+    "3.7 Changed: Section title changed from ..." names the section the
+    change *refers to*, not the section the text belongs to. Treating it as
+    a heading attributes everything after it to a section it is not in,
+    which is a wrong citation — worse than a missing one.
+    """
+    blocks = [
+        Block("2 Categories of Training", page=8, heading_level=1),
+        Block("Training is categorised as initial, recurrent or requalification.", page=8),
+        Block("3.7 Changed: Section title changed from Crewmember Rules.", page=9),
+        Block("Further body text that belongs to section 2.", page=9),
+    ]
+    chunks = chunk_blocks(blocks, rag_settings)
+
+    assert all(c.section_number != "3.7" for c in chunks)
+
+
+def test_undersized_fragments_in_one_section_are_merged(rag_settings):
+    """
+    A one-line chunk retrieves badly: too little context to match a
+    question and too little to answer one.
+    """
+    blocks = [
+        Block("4.2 Currency", page=20, heading_level=2),
+        Block("Pilots shall log three landings.", page=20),
+        Block("Landings must be within ninety days.", page=20),
+        Block("Night currency requires night landings.", page=20),
+    ]
+    chunks = chunk_blocks(blocks, rag_settings)
+
+    assert len(chunks) == 1
+    assert chunks[0].token_count > 15
+    assert "ninety days" in chunks[0].text
+
+
+def test_merging_never_crosses_a_section_boundary(rag_settings):
+    """The whole point of the chunker is that a citation is accurate."""
+    blocks = [
+        Block("4.2 Currency", page=20, heading_level=2),
+        Block("Short text A.", page=20),
+        Block("4.3 Records", page=21, heading_level=2),
+        Block("Short text B.", page=21),
+    ]
+    chunks = chunk_blocks(blocks, rag_settings)
+
+    sections = {c.section_number: c.text for c in chunks}
+    assert "Short text B" not in sections.get("4.2", "")
+    assert "Short text A" not in sections.get("4.3", "")
+
+
+def test_every_chunk_is_citable(rag_settings):
+    """A passage with neither a section number nor a heading cannot be
+    cited, which makes it useless in an answer."""
+    blocks = [
+        Block("5 Operations", page=30, heading_level=1),
+        Block("Body text under a numbered section. " * 8, page=30),
+        Block("Unnumbered Heading", page=31, heading_level=2),
+        Block("Body text under a titled section. " * 8, page=31),
+    ]
+    chunks = chunk_blocks(blocks, rag_settings)
+
+    assert chunks
+    assert all(c.section_number or c.heading for c in chunks)

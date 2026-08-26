@@ -10,11 +10,14 @@ an answer can say "OPS-MAN-001 Rev C, §4.2.3, p. 51".
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 
 from ..config import RagSettings, get_settings
 from .parsers import Block
+
+log = logging.getLogger(__name__)
 
 # "4.2.3  Deferral of scheduled maintenance"
 _NUMBERED = re.compile(r"^(\d+(?:\.\d+){0,5})[.)]?\s+(\S.{0,150})$")
@@ -28,6 +31,109 @@ _NAMED = re.compile(
 _ATA = re.compile(r"^(\d{2}-\d{2}-\d{2})\b[\s.:\-]*(.*)$")
 
 _SENTENCE_END = re.compile(r"(?<=[.!?;:])\s+")
+
+# A table-of-contents entry: text, dot or space leaders, then a page number.
+# These are navigation, not content. Retrieving one tells a reader nothing
+# and pollutes the corpus with near-duplicates of every real heading.
+_TOC_LINE = re.compile(r"^.{2,100}?[.\u00b7\u2026\-\s]{4,}\d{1,4}$")
+
+# A revision-history row: "3.7 Changed: Section title changed from ...".
+# The leading number is the section the change *refers to*, not the section
+# this text belongs to. Treating it as a heading attributes every following
+# block to a section it is not in - a wrong citation, which is worse than a
+# missing one.
+_CHANGELOG_ROW = re.compile(
+    r"^\d+(?:\.\d+)*\s+(?:changed|added|removed|deleted|updated|revised|"
+    r"renamed|moved|clarified)\b",
+    re.IGNORECASE,
+)
+
+
+# "Preamble ii", "Appendices 21" - a contents entry whose page number is
+# separated by nothing but a space. Matching this line-by-line across a whole
+# document would be reckless ("Lesson 1", "Revision 4" are real headings), so
+# it is only applied to pages that are *mostly* made of such lines.
+_PAGE_REF_LINE = re.compile(r"^.{2,90}?\s+(?:[ivxlcdm]{1,7}|\d{1,4})$", re.IGNORECASE)
+
+
+# Four or more dots, however they are spaced. Contents pages are built from
+# these and body prose never contains them, so this is the single most
+# reliable navigation signal there is.
+_DOT_LEADER = re.compile(r"(?:\.\s?){4,}")
+
+
+def has_dot_leader(text: str) -> bool:
+    return bool(_DOT_LEADER.search(text))
+
+
+def running_headers(blocks: list[Block], *, threshold: float = 0.5) -> set[str]:
+    """
+    Text that repeats on most pages: the running header and footer.
+
+    A manual's page furniture - department name, revision, "Return to Table
+    of Contents" - is on every page and means nothing on any of them. Left
+    in, it is embedded hundreds of times and competes with real content for
+    retrieval. Identified by repetition rather than position, so it works
+    regardless of where the producer put it.
+    """
+    pages: dict[str, set[int]] = {}
+    page_numbers: set[int] = set()
+    for block in blocks:
+        if block.page is None:
+            continue
+        page_numbers.add(block.page)
+        text = block.text.strip()
+        # Only page furniture is this short; a repeated clause is not.
+        if text and len(text) <= 120:
+            pages.setdefault(text, set()).add(block.page)
+
+    if len(page_numbers) < 4:
+        return set()
+    minimum = max(3, int(len(page_numbers) * threshold))
+    return {text for text, seen in pages.items() if len(seen) >= minimum}
+
+
+def navigation_pages(blocks: list[Block], *, threshold: float = 0.6) -> set[int]:
+    """
+    Pages that are a table of contents, an index, or a revision-history table.
+
+    Detected at page level rather than line level. A single line ending in a
+    number proves nothing - "Revision 4" and "Lesson 1" are perfectly good
+    headings - but a page where most lines end that way is navigation, and
+    indexing it returns page numbers to someone who asked a question.
+    """
+    by_page: dict[int, list[str]] = {}
+    for block in blocks:
+        if block.page is None:
+            continue
+        text = block.text.strip()
+        if text:
+            by_page.setdefault(block.page, []).append(text)
+
+    navigation: set[int] = set()
+    for page, texts in by_page.items():
+        if len(texts) < 5:
+            continue
+        hits = sum(
+            1
+            for text in texts
+            if has_dot_leader(text)
+            or _TOC_LINE.match(text)
+            or _PAGE_REF_LINE.match(text)
+        )
+        if hits / len(texts) >= threshold:
+            navigation.add(page)
+    return navigation
+
+
+def is_navigation(text: str) -> bool:
+    """Table-of-contents entries and index lines carry no retrievable content."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if has_dot_leader(stripped):
+        return True
+    return bool(_TOC_LINE.match(stripped)) and not stripped.endswith(".")
 
 
 def count_tokens(text: str) -> int:
@@ -91,6 +197,10 @@ def _looks_like_heading(block: Block) -> tuple[bool, Section | None]:
     if not text:
         return False, None
 
+    # Neither of these starts a section, however much they look like one.
+    if _CHANGELOG_ROW.match(text) or is_navigation(text):
+        return False, None
+
     match = _NAMED.match(text)
     if match:
         number = f"{match.group(1).title()} {match.group(2)}"
@@ -115,6 +225,13 @@ def _looks_like_heading(block: Block) -> tuple[bool, Section | None]:
             return True, Section(number=number, title=title, level=depth)
 
     if block.is_heading:
+        # A styled line ending in a colon is a lead-in label - "Objective:",
+        # "Completion standards:", "References:" - not a section heading.
+        # They are bold and short, so typography alone cannot tell them
+        # apart, and treating each as a section shreds a procedure into
+        # one-line fragments and attaches a meaningless heading to each.
+        if text.endswith(":"):
+            return False, None
         return True, Section(number="", title=text[:150], level=block.heading_level or 1)
 
     return False, None
@@ -170,6 +287,14 @@ class StructureAwareChunker:
         hard_max = self.settings.chunk_max_tokens
         overlap = self.settings.chunk_overlap_tokens
 
+        skip_pages = navigation_pages(blocks)
+        furniture = running_headers(blocks)
+        if skip_pages or furniture:
+            log.debug(
+                "skipping %d navigation page(s) and %d running header/footer line(s)",
+                len(skip_pages), len(furniture),
+            )
+
         chunks: list[Chunk] = []
         stack: list[Section] = []
         current_section: Section | None = None
@@ -208,6 +333,14 @@ class StructureAwareChunker:
             text = block.text.strip()
             if not text:
                 continue
+            if text in furniture:
+                # Page furniture: present on every page, meaningful on none.
+                continue
+            if block.page in skip_pages or is_navigation(text):
+                # Contents and index pages are navigation; indexing them
+                # would return a page number where the reader wanted the
+                # clause itself.
+                continue
 
             is_heading, section = _looks_like_heading(block)
             if is_heading and section is not None:
@@ -239,10 +372,59 @@ class StructureAwareChunker:
 
         flush()
 
+        chunks = self._merge_undersized(chunks)
+
         # Re-number after the fact so ordinals are dense and stable.
         for index, chunk in enumerate(chunks):
             chunk.ordinal = index
         return [c for c in chunks if c.text.strip()]
+
+    def _merge_undersized(self, chunks: list[Chunk]) -> list[Chunk]:
+        """
+        Join neighbouring fragments that share a section.
+
+        Documents with dense sub-headings produce a long tail of one- and
+        two-line chunks. Individually they retrieve badly - too little
+        context to match a question, and too little to answer one - so
+        adjacent fragments from the same section are combined up to the
+        target size. Section boundaries are still never crossed.
+        """
+        minimum = max(0, self.settings.chunk_min_tokens)
+        if minimum <= 0 or not chunks:
+            return chunks
+
+        target = self.settings.chunk_target_tokens
+        merged: list[Chunk] = []
+
+        for chunk in chunks:
+            previous = merged[-1] if merged else None
+            if (
+                previous is not None
+                and previous.token_count < minimum
+                and previous.section_number == chunk.section_number
+                and previous.section_path == chunk.section_path
+                and previous.token_count + chunk.token_count <= target
+            ):
+                previous.text = f"{previous.text}\n\n{chunk.text}".strip()
+                previous.token_count = count_tokens(previous.text)
+                if chunk.page_start is not None:
+                    previous.page_start = (
+                        chunk.page_start
+                        if previous.page_start is None
+                        else min(previous.page_start, chunk.page_start)
+                    )
+                if chunk.page_end is not None:
+                    previous.page_end = (
+                        chunk.page_end
+                        if previous.page_end is None
+                        else max(previous.page_end, chunk.page_end)
+                    )
+                if not previous.heading:
+                    previous.heading = chunk.heading
+                continue
+            merged.append(chunk)
+
+        return merged
 
 
 def chunk_blocks(blocks: list[Block], settings: RagSettings | None = None) -> list[Chunk]:

@@ -816,6 +816,52 @@ remembering, or change how the platform is used. Newest at the top.
 **Watch out for:**
 -->
 
+### 2026-08-26 — Ingest pipeline validated against the real manuals
+
+**Who:** initial build, run against AOM Rev 4, ATM Rev 4 and SOP Rev 1
+**What changed:** Running three real governing manuals through the pipeline
+found four defects that synthetic tests had not. All are general, not
+specific to these documents.
+
+| Defect | Effect | Fix |
+|---|---|---|
+| Whitespace-only spans were skipped | `Sectiontitlechangedfrom` — words glued together in LaTeX-produced PDFs, corrupting both the embedding and the quoted text | keep space spans, use them only for text |
+| Contents pages indexed as content | retrieving a page number instead of the clause, plus a near-duplicate of every real heading | detect navigation pages and dot leaders |
+| Running headers embedded on every page | page furniture embedded hundreds of times, competing with content | strip text repeating on ≥50% of pages |
+| Lead-in labels treated as headings | `Objective:` `References:` shredded each lesson into one-line fragments | a styled line ending in a colon is a label |
+
+Also added: revision-history rows no longer reassign the section (a row
+reading *"3.7 Changed: ..."* names the section it refers to, not the section
+the text is in — attributing following text to §3.7 is a wrong citation,
+which is worse than a missing one), and undersized fragments sharing a
+section are merged.
+
+**Measured effect on the ATM:** 495 chunks → 283, fragments under 25 tokens
+194 → 58, median chunk 36 → 104 tokens. A training lesson now stays in one
+retrievable piece with its own heading instead of eight fragments.
+
+**Current state of the three manuals:**
+
+| | pages | chunks | median tokens | with §number | citable |
+|---|---:|---:|---:|---:|---:|
+| AOM | 157 | 425 | 136 | 84% | 100% |
+| ATM | 184 | 283 | 104 | 31% | 100% |
+| SOP | 143 | 404 | 43 | 32% | 100% |
+
+**Watch out for:**
+- **Every chunk is citable** — by section number or by heading — but only the
+  AOM is mostly section-numbered. ATM and SOP citations will more often read
+  *"ATM-001 Rev 4, Lesson 1: Ground — King Air B350"* than *"§4.2"*. That is
+  accurate, just less precise.
+- **The SOP is graphics-heavy**: 261 embedded images and about half the AOM's
+  text density. Text pages index fine; pages that are purely a diagram or a
+  screenshot have no text layer and will not be retrievable until OCR'd.
+  Roughly 4% of its pages are image-dominant.
+- The ATM and SOP are **Final Candidate** drafts. Set a real effective date
+  and re-ingest once approved, so citations show the approved revision.
+- `config/docs-manifest-example.yaml` is ready to run; set the access groups
+  before you do.
+
 ### 2026-08-25 — The model now plans definitions, not SQL
 
 **Who:** initial build, following the generator's proven design

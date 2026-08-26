@@ -108,6 +108,9 @@ class RagSettings(BaseModel):
     chunk_target_tokens: int = 700
     chunk_overlap_tokens: int = 90
     chunk_max_tokens: int = 1200
+    # Fragments below this are merged with the neighbour that shares
+    # their section. Set to 0 to keep every fragment separate.
+    chunk_min_tokens: int = 120
     # Retrieval fan-out before reranking.
     vector_top_k: int = 40
     keyword_top_k: int = 40
