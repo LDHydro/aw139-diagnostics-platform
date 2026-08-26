@@ -1,0 +1,69 @@
+% Work pack / maintenance report template.
+% Placeholders in <<angle brackets>> are filled by the model from the brief.
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=22mm,headheight=15pt]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{caption}
+
+\definecolor{rulegrey}{gray}{0.45}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small <<ORGANISATION>> --- Maintenance Work Pack}
+\rhead{\small <<AIRCRAFT REGISTRATION>> / <<WORK ORDER>>}
+\lfoot{\small Generated <<DATE>>. Verify against the current revision before use.}
+\rfoot{\small Page \thepage\ of \pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\usepackage{lastpage}
+\setlist[itemize]{itemsep=2pt,topsep=3pt}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries <<TITLE>>}\\[4pt]
+  {\large <<SUBTITLE>>}
+\end{center}
+\vspace{4mm}
+
+\begin{tabularx}{\textwidth}{@{}l X l X@{}}
+  \toprule
+  \textbf{Aircraft}    & <<REGISTRATION>> & \textbf{Serial}   & <<SERIAL>> \\
+  \textbf{Model}       & <<MODEL>>        & \textbf{Config}   & <<CONFIGURATION>> \\
+  \textbf{Flight hours}& <<HOURS>>        & \textbf{Cycles}   & <<CYCLES>> \\
+  \textbf{Station}     & <<STATION>>      & \textbf{Planned}  & <<START>> -- <<END>> \\
+  \bottomrule
+\end{tabularx}
+
+\section*{Scope}
+<<SCOPE PARAGRAPH>>
+
+\section*{Task cards in this visit}
+\begin{longtable}{@{}l p{62mm} l l r@{}}
+  \toprule
+  \textbf{Card} & \textbf{Title} & \textbf{Due} & \textbf{Basis} & \textbf{M/H} \\
+  \midrule
+  \endhead
+  <<TASK ROWS>>
+  \bottomrule
+\end{longtable}
+
+\section*{References}
+<<REFERENCE LIST>>
+
+\section*{Certification}
+\vspace{10mm}
+\begin{tabularx}{\textwidth}{@{}X X X@{}}
+  \hrulefill & \hrulefill & \hrulefill \\
+  Performed by / Licence & Inspected by / Stamp & Date \\
+\end{tabularx}
+
+\end{document}

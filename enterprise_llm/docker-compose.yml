@@ -1,0 +1,86 @@
+# PostgreSQL with pgvector, plus optional gateway and LaTeX containers.
+#
+# The vLLM model servers deliberately run on the host, not here: an external
+# GPU behind Thunderbolt/OCuLink is fiddly enough to pass into a container
+# that the operational cost outweighs the benefit. Use deploy/start_models.sh
+# (or the elp-models systemd unit) for those.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: elp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-elp}
+      POSTGRES_USER: ${POSTGRES_USER:-elp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # The corpus is small and the queries are vector-heavy; give Postgres
+      # enough room to keep the HNSW index resident.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - effective_cache_size=6GB
+      - -c
+      - maintenance_work_mem=1GB     # HNSW index builds want this
+      - -c
+      - work_mem=64MB
+      - -c
+      - max_parallel_workers_per_gather=4
+    ports:
+      # Loopback only: the database is never exposed off the workstation.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - elp-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-elp} -d ${POSTGRES_DB:-elp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: elp-gateway
+    restart: unless-stopped
+    profiles: ["containerised"]      # docker compose --profile containerised up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Inside the container, the host's model servers are on the gateway.
+      ELP_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-elp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-elp}
+      ELP_INFERENCE__CHAT_BASE_URL: http://host.docker.internal:8101/v1
+      ELP_INFERENCE__EMBED_BASE_URL: http://host.docker.internal:8102/v1
+      ELP_INFERENCE__RERANK_URL: http://host.docker.internal:8103/rerank
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
+    volumes:
+      - elp-artifacts:/app/artifacts
+      - ./config:/app/config:ro
+      # Mount each ELP_DEV__WORKSPACE_ROOTS path read-only, e.g.:
+      # - /srv/repos:/srv/repos:ro
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  elp-pgdata:
+  elp-artifacts:

@@ -1,0 +1,140 @@
+# Model serving profiles for a single RTX 5090 (32 GB GDDR7, Blackwell sm_120).
+#
+# Three vLLM processes share one card: the generalist chat model, an
+# embedding model and a cross-encoder reranker.  `gpu_memory_utilization` is
+# a fraction of TOTAL card memory, so the three values must sum to less than
+# 1.0 with headroom left for the display driver and fragmentation.
+#
+# START ORDER MATTERS.  vLLM measures free memory when it starts and sizes
+# its KV cache from what it sees.  Start the two small servers first and the
+# large one last, or the chat server will claim memory the others still need.
+# `deploy/start_models.sh` does this for you.
+#
+# Verify flag names against your installed vLLM version before editing:
+# some of these moved between releases.
+
+hardware:
+  gpu: "NVIDIA GeForce RTX 5090"
+  vram_gb: 32
+  compute_capability: "12.0"     # Blackwell, sm_120
+  minimum_driver: "570.00"
+  minimum_cuda: "12.8"
+  notes: >
+    An external GPU sits behind a Thunderbolt or OCuLink link that is far
+    narrower than a desktop x16 slot. Weights cross it once at start-up, so
+    expect slow first loads (minutes, not seconds) and then full speed, since
+    inference runs entirely in VRAM. Never enable CPU offload or swap space
+    on an eGPU: every offloaded tensor crosses that narrow link on every
+    token and will destroy throughput.
+
+profiles:
+
+  # Default. Strongest single model that leaves room for a usable KV cache.
+  balanced:
+    description: >
+      Qwen3-32B at 4-bit for chat, document Q&A, LaTeX and code, with
+      embeddings and reranking on the same card. Good quality, ~5-8
+      concurrent users at 32k context.
+    chat:
+      model: Qwen/Qwen3-32B-AWQ
+      port: 8101
+      gpu_memory_utilization: 0.78
+      max_model_len: 32768
+      quantization: awq_marlin
+      # fp8 KV halves cache memory per token, roughly doubling how many
+      # concurrent long conversations fit. Blackwell has native fp8.
+      kv_cache_dtype: fp8
+      extra_args:
+        - "--enable-prefix-caching"     # big win: the system prompt is reused
+        - "--max-num-seqs=16"
+    embeddings:
+      model: BAAI/bge-m3
+      port: 8102
+      gpu_memory_utilization: 0.07
+      max_model_len: 8192
+      task: embed
+      dim: 1024
+    reranker:
+      model: BAAI/bge-reranker-v2-m3
+      port: 8103
+      gpu_memory_utilization: 0.07
+      max_model_len: 8192
+      task: score
+    vram_budget_gb:
+      chat: 25.0
+      embeddings: 2.2
+      reranker: 2.2
+      headroom: 2.6
+
+  # More concurrent users, slightly weaker reasoning. A Mixture-of-Experts
+  # model activates only a fraction of its parameters per token, so it is
+  # much faster than its size suggests.
+  throughput:
+    description: >
+      Qwen3-30B-A3B (MoE, ~3B active parameters per token). Noticeably
+      faster and supports far more simultaneous users; a little weaker on
+      hard multi-step reasoning than the dense 32B.
+    chat:
+      model: Qwen/Qwen3-30B-A3B-Instruct-2507-AWQ
+      port: 8101
+      gpu_memory_utilization: 0.76
+      max_model_len: 32768
+      quantization: awq_marlin
+      kv_cache_dtype: fp8
+      extra_args:
+        - "--enable-prefix-caching"
+        - "--max-num-seqs=32"
+    embeddings:
+      model: BAAI/bge-m3
+      port: 8102
+      gpu_memory_utilization: 0.08
+      max_model_len: 8192
+      task: embed
+      dim: 1024
+    reranker:
+      model: BAAI/bge-reranker-v2-m3
+      port: 8103
+      gpu_memory_utilization: 0.08
+      max_model_len: 8192
+      task: score
+
+  # Long governing documents in a single context window.
+  long_context:
+    description: >
+      Smaller dense model with a much larger context window, for questions
+      that need a whole chapter in view at once rather than retrieved
+      passages. Lower reasoning quality than the 32B.
+    chat:
+      model: Qwen/Qwen3-14B-AWQ
+      port: 8101
+      gpu_memory_utilization: 0.80
+      max_model_len: 131072
+      quantization: awq_marlin
+      kv_cache_dtype: fp8
+      extra_args:
+        - "--enable-prefix-caching"
+        - "--max-num-seqs=8"
+    embeddings:
+      model: BAAI/bge-m3
+      port: 8102
+      gpu_memory_utilization: 0.06
+      max_model_len: 8192
+      task: embed
+      dim: 1024
+    reranker:
+      model: BAAI/bge-reranker-v2-m3
+      port: 8103
+      gpu_memory_utilization: 0.06
+      max_model_len: 8192
+      task: score
+
+# Changing the embedding model changes the vector dimension, which is baked
+# into the doc_chunks table. After such a change you must set
+# ELP_INFERENCE__EMBED_DIM, recreate the column and re-index every document:
+#   python scripts/reindex.py --confirm
+embedding_dimensions:
+  BAAI/bge-m3: 1024
+  BAAI/bge-large-en-v1.5: 1024
+  intfloat/multilingual-e5-large: 1024
+  Qwen/Qwen3-Embedding-0.6B: 1024
+  Qwen/Qwen3-Embedding-4B: 2560

@@ -1,0 +1,42 @@
+# RSL Aviation governing documents — ingest manifest
+#
+#   python scripts/ingest_docs.py --manifest docs-manifest-example.yaml
+#
+# Copy this next to the PDFs, set the access groups to your real AD groups,
+# and keep it in version control: it is the record of what is indexed, at
+# which revision, and who may read it.
+
+defaults:
+  department: Aviation
+  doc_type: governing
+  # Empty means every authenticated user. Narrow it per document below if a
+  # manual is not for general readership.
+  allowed_groups: []
+
+documents:
+  - file: RSL_Aviation_Operations_Manual__AOM__Revision_4____Final-2.pdf
+    doc_key: AOM-001
+    title: RSL Aviation Operations Manual
+    revision: "4"
+    effective_date: 2026-04-01
+
+  - file: RSL_Aviation_Training_Manual__ATM__Revision_4___Final_Candidate_1.pdf
+    doc_key: ATM-001
+    title: RSL Aviation Training Manual
+    revision: "4"
+    # Final Candidate at the time of writing — set the real effective date
+    # once it is approved, and re-ingest so the citation shows it.
+    meta:
+      status: final candidate
+
+  - file: RSL_Aviation_Standard_Operating_Procedures__SOP____Revision_1___Final_Candidate_1-2.pdf
+    doc_key: SOP-001
+    title: RSL Aviation Standard Operating Procedures
+    revision: "1"
+    meta:
+      status: final candidate
+      # 261 embedded images and roughly half the text density of the AOM.
+      # Text pages index fine; any page that is purely a diagram or a
+      # screenshot has no text layer and will not be retrievable until it
+      # is OCR'd.
+      note: graphics-heavy; OCR the image-only pages for full coverage

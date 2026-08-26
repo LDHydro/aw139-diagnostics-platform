@@ -1,0 +1,14 @@
+# Checks every 10 minutes for reports whose cron expression has come due.
+# The interval bounds how promptly a report is picked up; each report's own
+# schedule decides when it actually runs.
+[Unit]
+Description=ELP scheduled report check
+
+[Timer]
+OnCalendar=*:0/10
+# Run a missed check after downtime rather than waiting for the next slot.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

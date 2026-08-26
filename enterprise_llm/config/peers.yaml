@@ -1,0 +1,72 @@
+# Registry of other internal LLM/AI systems this platform may consult.
+#
+# Credentials are NEVER stored here. `auth_env_var` names an environment
+# variable that the gateway reads at call time; put the actual secret in the
+# systemd unit's EnvironmentFile or the container's secret store.
+#
+# `capabilities` are topic tags. A question whose wording overlaps a peer's
+# tags routes to that peer automatically; when tags are inconclusive the
+# local model picks. `allowed_groups` restricts which Active Directory
+# groups may trigger a call at all - useful when a peer system holds data
+# that not everyone here is cleared to see.
+#
+# Entries added through POST /v1/peers (stored in the database) override
+# entries with the same name here, so you can register a system without a
+# redeploy.
+
+peers: []
+
+# ---------------------------------------------------------------------
+# Worked examples. Uncomment and adapt.
+# ---------------------------------------------------------------------
+#
+# peers:
+#   # Any service exposing an OpenAI-compatible /chat/completions.
+#   - name: reliability-analytics
+#     display_name: Fleet Reliability Analytics
+#     description: >
+#       Component removal rates, MTBUR and failure trends across the fleet.
+#       Ask it about how often a part actually fails, not what the manual says.
+#     protocol: openai
+#     base_url: https://reliability.corp.internal/v1
+#     model: reliability-assistant
+#     auth_type: bearer
+#     auth_env_var: PEER_RELIABILITY_TOKEN
+#     capabilities: [reliability, mtbur, failure rate, component removal, trend]
+#     allowed_groups: [AW139-Engineering, AW139-Maint-Admins]
+#     timeout_s: 45
+#
+#   # A bespoke internal REST service.
+#   - name: parts-inventory
+#     display_name: Parts and Inventory System
+#     description: >
+#       Stock levels, lead times and AOG availability for spares by part
+#       number and station.
+#     protocol: rest
+#     base_url: https://inventory.corp.internal/api/assistant/query
+#     auth_type: api_key
+#     auth_header: X-API-Key
+#     auth_env_var: PEER_INVENTORY_KEY
+#     request_template:
+#       question: "{question}"
+#       context: "{context}"
+#       max_results: 5
+#     answer_path: data.summary
+#     references_path: data.sources
+#     capabilities: [stock, inventory, part number, lead time, AOG, spares]
+#
+#   # A service behind Entra ID using the client-credentials flow.
+#   - name: safety-reports
+#     display_name: Safety Management System
+#     description: Occurrence reports, hazard logs and safety recommendations.
+#     protocol: anthropic
+#     base_url: https://sms.corp.internal/v1
+#     model: sms-assistant
+#     auth_type: client_credentials
+#     token_url: https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token
+#     scope: api://sms-assistant/.default
+#     auth_env_var: PEER_SMS_CLIENT_SECRET
+#     meta:
+#       client_id: "<application-client-id>"
+#     capabilities: [safety, occurrence, hazard, incident, investigation]
+#     allowed_groups: [AW139-Maint-Admins, Safety-Department]
