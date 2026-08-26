@@ -816,6 +816,67 @@ remembering, or change how the platform is used. Newest at the top.
 **Watch out for:**
 -->
 
+### 2026-08-25 — SECURITY: rotate the NAMIS application-role password
+
+**Who:** noted while reading the NAMIS handoff notes
+**Status:** ACTION REQUIRED — not a platform change.
+
+The generator's `HANDOFF.md` contains the **live application-role credential
+in plaintext** (`MaintSystemUser` / the password beside it). The document
+itself says to rotate it, and security finding F-1 says the same, but it is
+worth stating plainly: that password now exists in the legacy client
+binaries, in the handoff document, and in wherever that document has been
+copied or emailed.
+
+**Do:**
+1. Rotate the `MaintSystemUser` role password on `NAMISNNSS`.
+2. Scrub it from `HANDOFF.md` and any copy of it. Replace with a pointer to
+   the secret store.
+3. Audit `NAMISNNSS` for `sp_setapprole` calls from outside the expected
+   host set (F-1's remediation step 4).
+
+**This platform does not need it.** The reporting service uses its own
+read-only login; the application role is only a fallback for sites where
+that login cannot be granted SELECT. Nothing here should ever hold that
+credential.
+
+### 2026-08-25 — Handoff notes reconciled: three fixes
+
+**Who:** initial build, from the generator's handoff notes
+**What changed:**
+- **Row counts removed as a table-selection signal.** The handoff says the
+  schema export came from a **test instance**, so volumes are not
+  representative and "don't prune tables by row count". Scoring on them
+  would have buried the busiest production tables behind whatever happened
+  to hold rows in test.
+- **Inferred joins are now labelled for the model.** 224 of the 723
+  relationships were inferred from name/type matching rather than read from
+  a foreign key. They are rendered separately with an instruction to declare
+  reliance on one in ASSUMPTIONS.
+- **`resolveCodes` added to the importer.** The handoff confirms the real
+  `ReportDefinition` field names — `table`, `joins`, `fields`, `filters`,
+  `sorts`, `filterLogic`, `rowLimit`, `resolveCodes` — and `resolveCodes`
+  was the one spelling the importer did not know.
+
+**Confirmed against the live catalogue:** 585 tables (NAMISNNSS 318,
+AMO_NASAWeb 163, OpsDBAMO 67, WebSupport_NASAWeb 37), 8,231 columns, 723
+relationships (499 real FKs + 224 inferred). Every figure matches.
+
+**Convergent design worth noting.** Their AI planner returns a *report
+definition, never SQL*, validated by the same builder as any other input —
+"the AI is an untrusted suggester". This platform's structured compiler
+arrived at the same conclusion independently, which is reassuring about
+both.
+
+**Still open on their side, and relevant here:**
+- Views and functions are not in the catalogue yet. Reports needing them
+  will fail the allowlist until the catalogue is regenerated with
+  `tools/export-views-and-functions.sql`.
+- GUID foreign keys resolve only through a live join, not the value-list
+  snapshot.
+- Ops-side inferred relationships are conservative; some tables need custom
+  joins.
+
 ### 2026-08-25 — Structured reports, saved-report import, Excel export
 
 **Who:** initial build, from the NAMIS generator's user guide

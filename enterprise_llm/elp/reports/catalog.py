@@ -221,9 +221,10 @@ class NamisCatalog:
         # Status column and so does everything else - so they saturate.
         score += min(2.0, 0.25 * column_hits)
 
-        # A table nobody references is unlikely to be the answer.
-        if spec.row_count:
-            score += 0.25
+        # Row counts are deliberately NOT a signal. The schema export came
+        # from a test instance, so the volumes are not representative of
+        # production - scoring on them would bury the busiest real tables
+        # behind whatever happened to hold rows in test.
         return score
 
     def select_for_request(
@@ -298,9 +299,24 @@ class NamisCatalog:
 
         joins = self.relationships_among([t.name for t in tables])
         if joins:
-            lines.append("\nKNOWN JOINS (use these exactly; compound keys must use every column)")
-            for relationship in joins:
+            confirmed = [j for j in joins if j.confidence == "fk"]
+            inferred = [j for j in joins if j.confidence != "fk"]
+            lines.append(
+                "\nKNOWN JOINS (use these exactly; compound keys must use every column)"
+            )
+            for relationship in confirmed:
                 lines.append(f"  {relationship.render(self)}")
+            if inferred:
+                # Roughly a third of the catalogue's relationships were
+                # inferred from name and type matching rather than read from
+                # a foreign key. They are usually right and occasionally not,
+                # so they are labelled rather than mixed in silently.
+                lines.append(
+                    "  -- the following are INFERRED, not declared foreign keys; "
+                    "say so in ASSUMPTIONS if you rely on one:"
+                )
+                for relationship in inferred:
+                    lines.append(f"  {relationship.render(self)}")
 
         return "\n".join(lines)
 

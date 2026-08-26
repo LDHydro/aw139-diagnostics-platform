@@ -8,11 +8,14 @@ shape as :mod:`elp.reports.structured`, so an imported report becomes a
 structured definition and inherits everything the platform adds: access
 control, approval, scheduling, narration and the wider set of export formats.
 
-**The key mapping here is inferred, not confirmed.** It was written from the
-generator's user guide rather than from a sample file, so it accepts several
-spellings for each field and reports anything it could not place instead of
-guessing. Run it with ``dry_run`` first against one real export and send back
-the ``unmapped`` list - that turns an inference into a fact.
+The key names are confirmed against the generator's own ``ReportDefinition``
+type, as documented in its handoff notes: ``table``, ``joins``, ``fields``,
+``filters``, ``sorts``, ``filterLogic``, ``rowLimit`` and ``resolveCodes``.
+Alternative spellings are still accepted, and anything that cannot be placed
+is reported rather than guessed at, because the *nested* shapes - what a
+field, join condition or filter looks like inside those lists - have still
+only been read from the user guide. Import one real export and check the
+``unmapped`` list before trusting a bulk migration.
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ _KEYS: dict[str, tuple[str, ...]] = {
     "filters": ("filters", "where", "criteria", "conditions"),
     "sort": ("sort", "sorts", "orderBy", "sortBy"),
     "row_limit": ("rowLimit", "limit", "maxRows", "top"),
-    "resolve_lookups": ("resolveLookups", "namesForCodedIds", "friendlyNames"),
+    "resolve_lookups": ("resolveCodes", "resolveLookups", "namesForCodedIds", "friendlyNames"),
     "filter_logic": ("filterLogic", "logic", "combine"),
 }
 
