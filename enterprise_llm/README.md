@@ -545,6 +545,53 @@ better posture. Where it is used, the platform holds the credential
 server-side in a root-owned file — which is what security finding F-1's
 remediation asks for, and the opposite of shipping it inside client binaries.
 
+### Structured reports: no injection surface at all
+
+Reports can be defined **structurally** — base table, fields, joins, filters,
+sort, limit — and compiled to T-SQL here, which is how the existing NAMIS
+generator works and is the safer of the two paths:
+
+| | Free-form SQL | Structured |
+|---|---|---|
+| Identifiers | validated by the guard | resolved through the catalogue and re-emitted from catalogue metadata |
+| Values | validated by the guard | always bound parameters |
+| Failure mode | the guard must prove a negative about a string | a bad name raises before any SQL exists |
+
+A crafted column name, table name, aggregate or operator raises rather than
+reaching the SQL text; a filter value that looks like SQL stays a bound
+parameter. Aliases are the one place a user string legitimately appears, and
+they are reduced to a conservative character set.
+
+The compiler also refuses the mistakes that produce *plausible but wrong*
+output: an unconditioned join (cartesian product), a join between columns of
+different kinds, more than eight joined tables, or a field from a table that
+was never joined. A missing sort order is filled in, because a report whose
+row order changes between runs is not a report.
+
+```bash
+# Bring existing reports over: copy %LOCALAPPDATA%\NamisReports\saved-reports\*.json
+curl -X POST "http://elp:8080/v1/reports/import?save=true&allowed_groups=AW139-Planning" \
+  -H "X-API-Key: $KEY" -F files=@open-work-requests.json -F files=@inspections-due.json
+```
+
+Each import is compiled against the catalogue immediately, so a report
+referring to a column that no longer exists is reported now rather than the
+first time it runs unattended. Run it without `save=true` first — the
+response includes `sql_preview`, `unmapped` and `compile_error` per file.
+
+> The saved-report key mapping was written from the generator's user guide
+> rather than a sample file. Import one real export with `save=false` and
+> check the `unmapped` list; anything listed there is a key this importer
+> does not yet know about.
+
+### Export formats
+
+`markdown`, `csv`, `html`, `json`, `pdf` and **`xlsx`**. Excel gets real types
+— dates sort as dates and numbers sum, with a frozen bold header, autofilter
+and sized columns — because a CSV of the same data needs cleaning before
+anyone can pivot it. PDF caps at 12 columns so it stays readable in
+landscape; the full set is in the Excel and CSV artifacts.
+
 > **What you need to supply:** the read-only login, the ODBC Driver 18 for
 > SQL Server on the host, and the exported catalogue. The platform assumes no
 > NAMIS schema of its own.

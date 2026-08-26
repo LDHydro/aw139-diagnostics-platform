@@ -11,6 +11,7 @@ numbers stopped arriving.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import UTC, datetime
@@ -83,6 +84,7 @@ async def execute(
             "run was refused. Re-approve the report to resume it.",
         )
 
+    compiled_parameters: dict = {}
     if definition.query_language == "sql":
         try:
             guard = validate(definition.query, settings)
@@ -93,6 +95,31 @@ async def execute(
             )
         query_to_run = guard.sql
         warnings = list(guard.notes)
+    elif definition.query_language == "structured":
+        # A structured definition is compiled here rather than stored as SQL,
+        # so a catalogue change is caught at run time instead of producing a
+        # query against a column that no longer exists.
+        from .catalog import get_catalog
+        from .structured import ReportSpecError, StructuredReport, compile_report
+
+        catalog = get_catalog()
+        if catalog is None or not len(catalog):
+            return _fail(
+                RunStatus.BLOCKED.value,
+                "this report is defined structurally but no NAMIS catalogue is "
+                "loaded, so it cannot be compiled. Set ELP_REPORTS__CATALOG_PATH.",
+            )
+        try:
+            spec = StructuredReport.from_dict(json.loads(definition.query))
+            compiled = compile_report(spec, catalog, max_rows=settings.max_rows)
+        except (json.JSONDecodeError, ReportSpecError) as exc:
+            return _fail(
+                RunStatus.BLOCKED.value,
+                f"the structured definition is not valid: {exc}",
+            )
+        query_to_run = compiled.sql
+        compiled_parameters = compiled.parameters
+        warnings = list(compiled.warnings)
     else:
         query_to_run = definition.query
         warnings = []
@@ -102,7 +129,14 @@ async def execute(
     # --- Query -------------------------------------------------------
     try:
         source = get_source(settings)
-        result: QueryResult = await source.run(query_to_run, run.parameters_used)
+        # Compiled parameters are the report's own; run parameters may
+        # override them for an ad-hoc re-run with different dates.
+        merged = {**compiled_parameters, **(run.parameters_used or {})}
+        result: QueryResult = await source.run(
+            query_to_run,
+            merged,
+            pre_validated=definition.query_language == "structured",
+        )
     except DataSourceError as exc:
         return _fail(RunStatus.FAILED.value, str(exc), warnings)
     except Exception as exc:  # noqa: BLE001

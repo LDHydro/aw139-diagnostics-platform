@@ -17,16 +17,18 @@ and row-limited. Unattended runs do not skip it, because nobody is watching.
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import audit
 from ..auth.deps import require_scope
 from ..auth.principal import Principal, Scope
+from ..config import get_settings
 from ..db import get_session
 from ..llm.client import InferenceError
 from ..models import ReportDefinition, ReportRun
@@ -53,6 +55,7 @@ from .schemas import (
     ReportCreateRequest,
     ReportDraftRequest,
     ReportDraftResponse,
+    ReportImportResult,
     ReportRunSummary,
     ReportScheduleRequest,
     ReportSummary,
@@ -276,6 +279,94 @@ async def ask(
             "unattended execution. Save and approve it to put it on a schedule."
         ),
     }
+
+
+@router.post("/import", response_model=list[ReportImportResult])
+async def import_saved_reports(
+    request: Request,
+    files: list[UploadFile] = File(..., description="Saved-report .json files"),
+    save: bool = False,
+    allowed_groups: str = "",
+    principal: Principal = Depends(require_scope(Scope.REPORTS)),
+    session: AsyncSession = Depends(get_session),
+) -> list[ReportImportResult]:
+    """
+    Import reports saved by the NAMIS report generator.
+
+    Copy `%LOCALAPPDATA%\\NamisReports\\saved-reports\\*.json` and upload them.
+    Each becomes a structured definition, which is compiled against the
+    catalogue immediately — so a report referring to a table or column the
+    catalogue does not know is reported now rather than the first time it
+    runs on a schedule.
+
+    Runs read-only unless `save=true`. Imported reports are created as
+    drafts and still need approval before they can be scheduled.
+    """
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+
+    from ..reports.catalog import get_catalog
+    from ..reports.import_saved import import_directory
+
+    staging = _Path(tempfile.mkdtemp(prefix="elp-saved-reports-"))
+    try:
+        for upload in files:
+            name = _Path(upload.filename or "report.json").name
+            if not name.lower().endswith(".json"):
+                continue
+            (staging / name).write_bytes(await upload.read())
+
+        catalog = get_catalog()
+        imported = import_directory(
+            staging, catalog, max_rows=get_settings().reports.max_rows
+        )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    groups = [g.strip() for g in allowed_groups.split(",") if g.strip()]
+    results: list[ReportImportResult] = []
+
+    for entry in imported:
+        payload = ReportImportResult(**entry.to_dict())
+        if save:
+            if not entry.compiles:
+                payload.save_error = (
+                    "not saved: the definition does not compile against the "
+                    "catalogue"
+                )
+            else:
+                try:
+                    await create_definition(
+                        session,
+                        name=entry.name,
+                        request_text=entry.description
+                        or f"Imported from {entry.source_file}",
+                        query=_json.dumps(entry.report.to_dict()),
+                        principal=principal,
+                        description=entry.description,
+                        query_language="structured",
+                        output_formats=["xlsx", "csv", "markdown"],
+                        allowed_groups=groups,
+                    )
+                    payload.saved = True
+                except ReportError as exc:
+                    payload.save_error = str(exc)
+        results.append(payload)
+
+    await audit.record(
+        session,
+        principal,
+        "reports.import",
+        resource=f"{len(files)} file(s)",
+        request=request,
+        detail={
+            "imported": len(results),
+            "compiled": sum(1 for r in results if r.compiles),
+            "saved": sum(1 for r in results if r.saved),
+        },
+    )
+    return results
 
 
 # ----------------------------------------------------------------------

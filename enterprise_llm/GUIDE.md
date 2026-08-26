@@ -423,6 +423,19 @@ Two things to get right before this works:
   certificate, matching what the production ops apps already use. Drop it
   once a trusted certificate is installed.
 
+**Bring the existing reports over.** Copy
+`%LOCALAPPDATA%\NamisReports\saved-reports\*.json` off the machine that has
+them and import, without saving, to see what maps:
+
+```bash
+curl -X POST "http://localhost:8080/v1/reports/import" -H "X-API-Key: $KEY" \
+  -F files=@open-work-requests.json | python -m json.tool
+```
+
+Check `compiles`, `unmapped` and `sql_preview` on each. Then re-run with
+`?save=true&allowed_groups=...`. They arrive as drafts and still need
+approval before they can be scheduled.
+
 **Deploy the catalogue.** Export it from the report generator
 (`build-windows.sh` regenerates it) and copy it to
 `/opt/elp/config/namis-catalog.json`. It is deliberately not in the
@@ -802,6 +815,34 @@ remembering, or change how the platform is used. Newest at the top.
 **Why:**
 **Watch out for:**
 -->
+
+### 2026-08-25 — Structured reports, saved-report import, Excel export
+
+**Who:** initial build, from the NAMIS generator's user guide
+**What changed:**
+- **Structured report definitions** (`elp/reports/structured.py`), compiled
+  to parameterised T-SQL. Same model as the existing generator — base table,
+  fields, joins, filters, sort, limit — and it has **no injection surface**:
+  identifiers are resolved through the catalogue and re-emitted from
+  catalogue metadata, values are always bound parameters.
+- **Saved-report import** (`POST /v1/reports/import`). Existing reports carry
+  over instead of being re-authored, and are compiled against the catalogue
+  on import.
+- **Excel export** with real types, plus a 12-column cap on PDF.
+
+**Watch out for:**
+- **The saved-report key mapping is inferred, not confirmed** — written from
+  the user guide, not a sample file. Import one real export with
+  `save=false` and read the `unmapped` list. Anything there is a key the
+  importer does not know; send it back and it becomes a one-line fix.
+- Imported reports arrive as **drafts**. They still need approval before
+  they can be scheduled — the same rule as any other report.
+- The compiler refuses joins between columns of different kinds. Where the
+  catalogue does not state a `kind` it is now inferred from the SQL type, so
+  a stale catalogue export will be stricter than a fresh one.
+- Structured reports are compiled at **run** time, not stored as SQL. A
+  catalogue change that breaks a report surfaces as a blocked run with a
+  clear reason, rather than a query against a column that no longer exists.
 
 ### 2026-08-25 — NAMIS reporting reconciled with the real system
 

@@ -309,11 +309,43 @@ class NamisCatalog:
 # Loading
 # ----------------------------------------------------------------------
 
+# SQL type -> the coarse kind the compiler reasons about. The exported
+# catalogue supplies `kind` directly, but a hand-written or older export may
+# not, and the join type-check is only as good as this classification.
+_KIND_BY_SQL_TYPE: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("bit",), "bool"),
+    (
+        ("int", "bigint", "smallint", "tinyint", "decimal", "numeric",
+         "float", "real", "money", "smallmoney"),
+        "number",
+    ),
+    (("date", "datetime", "datetime2", "smalldatetime", "datetimeoffset", "time"), "date"),
+    (
+        ("varchar", "nvarchar", "char", "nchar", "text", "ntext",
+         "uniqueidentifier", "xml"),
+        "text",
+    ),
+    (("binary", "varbinary", "image"), "binary"),
+)
+
+
+def infer_kind(sql_type: str) -> str:
+    """Classify a SQL type when the catalogue does not state a kind."""
+    base = (sql_type or "").split("(")[0].strip().lower()
+    if not base:
+        return ""
+    for names, kind in _KIND_BY_SQL_TYPE:
+        if base in names:
+            return kind
+    return ""
+
+
 def _column_from(raw: dict) -> ColumnSpec:
+    sql_type = str(raw.get("sql") or raw.get("type") or "")
     return ColumnSpec(
         name=str(raw.get("name", "")),
-        sql=str(raw.get("sql") or raw.get("type") or ""),
-        kind=str(raw.get("kind") or ""),
+        sql=sql_type,
+        kind=str(raw.get("kind") or "") or infer_kind(sql_type),
         nullable=bool(raw.get("nullable", True)),
         pk=bool(raw.get("pk", False)),
         lookup=raw.get("lookup"),

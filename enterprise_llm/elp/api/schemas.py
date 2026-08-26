@@ -413,7 +413,7 @@ class ReportCreateRequest(BaseModel):
     query: str = Field(..., min_length=5)
     description: str = ""
     source: str = "namis"
-    query_language: Literal["sql", "rest"] = "sql"
+    query_language: Literal["sql", "structured", "rest"] = "sql"
     parameters: dict = Field(default_factory=dict)
     output_formats: list[str] = Field(default_factory=lambda: ["markdown", "csv"])
     narrative: bool = True
@@ -429,6 +429,22 @@ class ReportUpdateRequest(BaseModel):
     output_formats: list[str] | None = None
     narrative: bool | None = None
     allowed_groups: list[str] | None = None
+
+
+class ReportImportResult(BaseModel):
+    name: str
+    source_file: str = ""
+    base_table: str = ""
+    field_count: int = 0
+    join_count: int = 0
+    filter_count: int = 0
+    compiles: bool = False
+    compile_error: str = ""
+    unmapped: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    sql_preview: str = ""
+    saved: bool = False
+    save_error: str = ""
 
 
 class ReportScheduleRequest(BaseModel):

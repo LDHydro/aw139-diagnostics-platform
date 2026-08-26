@@ -1,6 +1,7 @@
 """Operational reporting against NAMIS, driven by plain-language requests."""
 
 from .authoring import QueryDraft, draft_query, narrate
+from .catalog import NamisCatalog, TableSpec, get_catalog, load_catalog
 from .cron import CronError, describe, is_due, next_run, parse
 from .datasource import (
     DataSourceError,
@@ -11,7 +12,14 @@ from .datasource import (
     get_source,
     render_schema_catalogue,
 )
-from .render import SUPPORTED_FORMATS, Artifact, write_artifacts
+from .import_saved import ImportedReport, import_directory, parse_saved_report
+from .render import (
+    PDF_MAX_COLUMNS,
+    SUPPORTED_FORMATS,
+    Artifact,
+    to_xlsx,
+    write_artifacts,
+)
 from .runner import execute, run_due
 from .service import (
     ReportError,
@@ -31,8 +39,19 @@ from .service import (
     update_definition,
 )
 from .sqlguard import GuardResult, UnsafeQuery, validate
+from .structured import (
+    FieldRef,
+    FilterSpec,
+    JoinCondition,
+    JoinSpec,
+    ReportSpecError,
+    SortSpec,
+    StructuredReport,
+    compile_report,
+)
 
 __all__ = [
+    "PDF_MAX_COLUMNS",
     "SUPPORTED_FORMATS",
     "Artifact",
     "CronError",
@@ -70,5 +89,21 @@ __all__ = [
     "set_schedule",
     "update_definition",
     "validate",
+    "FieldRef",
+    "FilterSpec",
+    "ImportedReport",
+    "JoinCondition",
+    "JoinSpec",
+    "NamisCatalog",
+    "ReportSpecError",
+    "SortSpec",
+    "StructuredReport",
+    "TableSpec",
+    "compile_report",
+    "get_catalog",
+    "import_directory",
+    "load_catalog",
+    "parse_saved_report",
+    "to_xlsx",
     "write_artifacts",
 ]

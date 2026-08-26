@@ -9,92 +9,15 @@ query — plus the T-SQL-only escape routes the guard has to know about.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from elp.config import ReportSettings
-from elp.reports.catalog import NamisCatalog, load_catalog, reset_catalog
 from elp.reports.sqlguard import UnsafeQuery, enforce_limit, validate
 
 
 @pytest.fixture
 def mssql():
     return ReportSettings(sql_dialect="mssql", max_rows=5000)
-
-
-@pytest.fixture
-def catalog_file(tmp_path):
-    """A miniature catalogue in the shape the report generator exports."""
-    data = {
-        "groups": [
-            {"name": "Work Requests", "tables": ["WorkRequest", "WRStatusHist"]},
-            {"name": "Aircraft & Assets", "tables": ["AIRCRAFT", "ASSETLCF"]},
-        ],
-        "tables": {
-            "WorkRequest": {
-                "name": "WorkRequest", "table": "WorkRequest", "schema": "dbo",
-                "database": "NAMISNNSS", "group": "Work Requests",
-                "objectType": "TABLE", "rowCount": 120000,
-                "columns": [
-                    {"name": "WRId", "sql": "uniqueidentifier", "kind": "text",
-                     "nullable": False, "pk": True},
-                    {"name": "WRNo", "sql": "char(7)", "kind": "text", "nullable": True},
-                    {"name": "StatusCd", "sql": "char(3)", "kind": "text", "nullable": True},
-                    {"name": "AssetKey", "sql": "decimal(9,0)", "kind": "number"},
-                    {"name": "AssetSite", "sql": "varchar(15)", "kind": "text"},
-                ],
-            },
-            "WRStatusHist": {
-                "name": "WRStatusHist", "schema": "dbo", "database": "NAMISNNSS",
-                "columns": [
-                    {"name": "WRId", "sql": "uniqueidentifier", "pk": True},
-                    {"name": "StatusCdAfter", "sql": "char(3)"},
-                ],
-            },
-            "AIRCRAFT": {
-                "name": "AIRCRAFT", "schema": "dbo", "database": "NAMISNNSS",
-                "group": "Aircraft & Assets",
-                "columns": [
-                    {"name": "AssetKey", "sql": "decimal(9,0)", "pk": True},
-                    {"name": "AssetSite", "sql": "varchar(15)", "pk": True},
-                    {"name": "TailNumber", "sql": "varchar(15)"},
-                ],
-            },
-            "FlightRecordHeaders": {
-                "name": "FlightRecordHeaders", "schema": "dbo",
-                "database": "AMO_NASAWeb",
-                "columns": [{"name": "SortieID", "sql": "varchar(40)"}],
-            },
-        },
-        "relationships": [
-            {
-                "left": "AIRCRAFT", "right": "WorkRequest",
-                "on": [
-                    {"leftColumn": "AssetKey", "rightColumn": "AssetKey"},
-                    {"leftColumn": "AssetSite", "rightColumn": "AssetSite"},
-                ],
-                "database": "NAMISNNSS", "confidence": "fk",
-            },
-            {
-                "left": "WorkRequest", "right": "WRStatusHist",
-                "on": [{"leftColumn": "WRId", "rightColumn": "WRId"}],
-                "confidence": "fk",
-            },
-        ],
-        "lookups": {"aircraftTail": {}},
-    }
-    path = tmp_path / "namis-catalog.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
-    return path
-
-
-@pytest.fixture
-def catalog(catalog_file) -> NamisCatalog:
-    reset_catalog()
-    loaded = load_catalog(catalog_file)
-    yield loaded
-    reset_catalog()
 
 
 # ----------------------------------------------------------------------
@@ -307,5 +230,7 @@ def test_rendering_caps_wide_tables(catalog):
 
 
 def test_a_missing_catalogue_is_reported_not_swallowed(tmp_path):
+    from elp.reports.catalog import load_catalog
+
     with pytest.raises(FileNotFoundError, match="ELP_REPORTS__CATALOG_PATH"):
         load_catalog(tmp_path / "absent.json")

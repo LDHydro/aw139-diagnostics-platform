@@ -26,7 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ..config import ReportSettings, get_settings
-from .sqlguard import UnsafeQuery, redact_columns, validate
+from .sqlguard import GuardResult, UnsafeQuery, redact_columns, validate
 
 log = logging.getLogger(__name__)
 
@@ -468,11 +468,29 @@ class SqlNamisSource(NamisSource):
                     f"${self.settings.namis_app_role_env_var} is empty"
                 )
 
-    async def run(self, query: str, parameters: dict | None = None) -> QueryResult:
-        try:
-            guard = validate(query, self.settings)
-        except UnsafeQuery as exc:
-            raise DataSourceError(str(exc)) from exc
+    async def run(
+        self,
+        query: str,
+        parameters: dict | None = None,
+        *,
+        pre_validated: bool = False,
+    ) -> QueryResult:
+        """
+        Execute a read-only query.
+
+        ``pre_validated`` is for SQL this platform generated itself from a
+        structured definition: every identifier came from the catalogue and
+        every value is a bound parameter, so there is no untrusted string to
+        validate. It still gets the row cap, the redaction pass and the
+        read-only session.
+        """
+        if pre_validated:
+            guard = GuardResult(sql=query, tables=[], limit_applied=None, notes=[])
+        else:
+            try:
+                guard = validate(query, self.settings)
+            except UnsafeQuery as exc:
+                raise DataSourceError(str(exc)) from exc
 
         engine = self.engine()
         started = time.monotonic()

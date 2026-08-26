@@ -14,7 +14,8 @@ import io
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from ..config import ReportSettings, get_settings
@@ -23,7 +24,12 @@ from .datasource import QueryResult
 
 log = logging.getLogger(__name__)
 
-SUPPORTED_FORMATS = ("markdown", "csv", "html", "pdf", "json")
+SUPPORTED_FORMATS = ("markdown", "csv", "html", "pdf", "json", "xlsx")
+
+# A PDF wider than this stops being readable in landscape. The existing
+# NAMIS generator caps at the same point and tells the reader to use
+# Excel or CSV for the full set.
+PDF_MAX_COLUMNS = 12
 
 # LaTeX special characters, escaped so a part number containing an
 # underscore does not blow up the compile.
@@ -203,12 +209,14 @@ def to_latex(
     settings = settings or get_settings().reports
     generated_at = generated_at or datetime.now(UTC)
 
-    column_spec = "l" * len(result.columns) if result.columns else "l"
-    header = " & ".join(f"\\textbf{{{_escape_latex(c)}}}" for c in result.columns)
+    visible = min(len(result.columns), PDF_MAX_COLUMNS)
+    columns = result.columns[:visible]
+    column_spec = "l" * visible if columns else "l"
+    header = " & ".join(f"\\textbf{{{_escape_latex(c)}}}" for c in columns)
 
     body_rows = []
     for row in result.rows[:max_table_rows]:
-        cells = [_escape_latex(_cell(v, 80)) for v in row]
+        cells = [_escape_latex(_cell(v, 80)) for v in row[:visible]]
         body_rows.append(" & ".join(cells) + r" \\")
 
     narrative_block = ""
@@ -276,6 +284,91 @@ def to_latex(
         + truncation_note
         + "\n\\end{document}\n"
     )
+
+
+def _looks_numeric(value) -> bool:
+    if isinstance(value, bool):
+        return False
+    return isinstance(value, (int, float, Decimal))
+
+
+def to_xlsx(
+    result: QueryResult,
+    path: Path,
+    *,
+    title: str,
+    generated_at: datetime | None = None,
+) -> None:
+    """
+    Write a spreadsheet with real types.
+
+    The point of Excel over CSV is that dates sort as dates and numbers sum
+    correctly - a CSV of the same data needs cleaning before anyone can pivot
+    it. Values are written in their native type rather than stringified, the
+    header is frozen and filterable, and columns are sized to their content.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "openpyxl is required for Excel export; install the 'excel' extra"
+        ) from exc
+
+    generated_at = generated_at or datetime.now(UTC)
+    workbook = Workbook()
+    sheet = workbook.active
+    # Excel refuses sheet names over 31 chars or containing []:*?/\
+    sheet.title = re.sub(r"[\[\]:*?/\\]", "-", title)[:31] or "Report"
+
+    sheet.append([title])
+    sheet["A1"].font = Font(bold=True, size=14)
+    sheet.append([
+        f"Generated {generated_at.strftime('%Y-%m-%d %H:%M UTC')} - "
+        f"{result.row_count} row(s)"
+    ])
+    sheet["A2"].font = Font(italic=True, size=9, color="666666")
+    sheet.append([])
+
+    header_row = 4
+    sheet.append(list(result.columns))
+    header_fill = PatternFill("solid", fgColor="DDE5F0")
+    for index in range(1, len(result.columns) + 1):
+        cell = sheet.cell(row=header_row, column=index)
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    for row in result.rows:
+        sheet.append([
+            # datetime and Decimal round-trip natively; everything else is
+            # written as-is so Excel infers the type.
+            value if (value is None or _looks_numeric(value)
+                      or isinstance(value, (datetime, date))) else str(value)
+            for value in row
+        ])
+
+    if result.columns:
+        span = f"A{header_row}:{get_column_letter(len(result.columns))}{header_row + result.row_count}"
+        sheet.auto_filter.ref = span
+        sheet.freeze_panes = sheet.cell(row=header_row + 1, column=1)
+
+        for index, column in enumerate(result.columns, start=1):
+            widest = len(str(column))
+            for row in result.rows[:200]:
+                if index - 1 < len(row) and row[index - 1] is not None:
+                    widest = max(widest, len(str(row[index - 1])))
+            sheet.column_dimensions[get_column_letter(index)].width = min(
+                50, max(10, widest + 2)
+            )
+
+    # Landscape, fit to page width: these reports are wide.
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.fitToWidth = 1
+    sheet.print_title_rows = f"{header_row}:{header_row}"
+
+    workbook.save(str(path))
 
 
 async def write_artifacts(
@@ -357,7 +450,16 @@ async def write_artifacts(
                     ),
                     encoding="utf-8",
                 )
+            elif output_format == "xlsx":
+                path = directory / f"{safe_name}.xlsx"
+                to_xlsx(result, path, title=title, generated_at=generated_at)
             else:  # pdf
+                if len(result.columns) > PDF_MAX_COLUMNS:
+                    warnings.append(
+                        f"the PDF shows the first {PDF_MAX_COLUMNS} of "
+                        f"{len(result.columns)} columns so it stays readable; "
+                        "use the Excel or CSV artifact for the full set"
+                    )
                 source = to_latex(
                     result, title=title, request_text=request_text,
                     narrative=narrative, generated_at=generated_at, settings=settings,

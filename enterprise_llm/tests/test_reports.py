@@ -313,3 +313,87 @@ def test_no_write_statement_can_reach_the_database(open_settings=None):
     for statement in writes:
         with pytest.raises(UnsafeQuery):
             validate(statement, settings)
+
+
+# ----------------------------------------------------------------------
+# Excel export
+# ----------------------------------------------------------------------
+
+def test_excel_preserves_real_types(tmp_path):
+    """
+    The point of Excel over CSV is that dates sort as dates and numbers sum.
+
+    Stringifying everything would make the export no better than the CSV it
+    sits beside.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+
+    from elp.reports.render import to_xlsx
+
+    openpyxl = pytest.importorskip("openpyxl")
+
+    result = QueryResult(
+        columns=["Work Request", "Opened", "Hours", "Status"],
+        rows=[
+            ["WO-1001", datetime(2026, 8, 1, 9, 30), Decimal("12.5"), "OPEN"],
+            ["WO-1002", None, None, None],
+        ],
+        row_count=2,
+    )
+    path = tmp_path / "report.xlsx"
+    to_xlsx(result, path, title="Open Work Orders")
+
+    sheet = openpyxl.load_workbook(path).active
+    values = list(sheet.iter_rows(min_row=5, max_row=5, values_only=True))[0]
+    assert isinstance(values[1], datetime)
+    assert isinstance(values[2], (int, float))
+    assert values[0] == "WO-1001"
+
+
+def test_excel_header_is_frozen_and_filterable(tmp_path):
+    from elp.reports.render import to_xlsx
+
+    openpyxl = pytest.importorskip("openpyxl")
+
+    result = QueryResult(columns=["a", "b"], rows=[["x", "y"]], row_count=1)
+    path = tmp_path / "r.xlsx"
+    to_xlsx(result, path, title="R")
+
+    sheet = openpyxl.load_workbook(path).active
+    assert sheet.freeze_panes == "A5"
+    assert sheet.auto_filter.ref is not None
+    assert sheet.cell(row=4, column=1).font.bold
+
+
+def test_excel_sheet_name_is_sanitised(tmp_path):
+    """Excel refuses names over 31 characters or containing []:*?/\\"""
+    from elp.reports.render import to_xlsx
+
+    openpyxl = pytest.importorskip("openpyxl")
+
+    result = QueryResult(columns=["a"], rows=[["x"]], row_count=1)
+    path = tmp_path / "r.xlsx"
+    to_xlsx(result, path, title="Work/Requests: [2026] *all* very long title indeed")
+
+    sheet = openpyxl.load_workbook(path).active
+    assert len(sheet.title) <= 31
+    assert not set(sheet.title) & set("[]:*?/\\")
+
+
+def test_pdf_caps_its_column_count(result):
+    """
+    A PDF wider than twelve columns is unreadable in landscape.
+
+    The full set is still in the CSV and Excel artifacts.
+    """
+    from elp.reports.render import PDF_MAX_COLUMNS, to_latex
+
+    wide = QueryResult(
+        columns=[f"column_{i}" for i in range(20)],
+        rows=[[i for i in range(20)]],
+        row_count=1,
+    )
+    rendered = to_latex(wide, title="Wide report")
+    assert rendered.count(r"\textbf{") == PDF_MAX_COLUMNS
+    validate_source(rendered)
