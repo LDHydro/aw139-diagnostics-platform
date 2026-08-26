@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from elp.rag import chunker
 from elp.rag.chunker import chunk_blocks, count_tokens
 from elp.rag.parsers import Block
 
@@ -114,7 +115,24 @@ def test_empty_input_produces_no_chunks(rag_settings):
 
 
 def test_token_counter_is_monotonic():
-    assert count_tokens("") >= 1
+    assert count_tokens("") == 0
+    assert count_tokens("a") >= 1
+    assert count_tokens("a short line") < count_tokens("a considerably longer line " * 20)
+
+
+def test_token_counter_agrees_at_the_boundaries_without_tiktoken(monkeypatch):
+    """
+    The fallback has to honour the same contract as the real encoder.
+
+    Whether tiktoken can fetch its vocabulary depends on the network the box
+    is on, so both paths run in production and must size chunks the same way
+    at the edges.  This test forces the fallback; the one above runs on
+    whichever path the environment provides.
+    """
+    monkeypatch.setattr(chunker, "_ENCODER", None)
+    monkeypatch.setattr(chunker, "_ENCODER_RESOLVED", True)
+    assert count_tokens("") == 0
+    assert count_tokens("a") >= 1
     assert count_tokens("a short line") < count_tokens("a considerably longer line " * 20)
 
 

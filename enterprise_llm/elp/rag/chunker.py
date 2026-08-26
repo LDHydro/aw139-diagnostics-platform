@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..config import RagSettings, get_settings
 from .parsers import Block
@@ -136,6 +137,32 @@ def is_navigation(text: str) -> bool:
     return bool(_TOC_LINE.match(stripped)) and not stripped.endswith(".")
 
 
+_ENCODER: Any = None
+_ENCODER_RESOLVED = False
+
+
+def _encoder() -> Any:
+    """
+    Resolve the tiktoken encoder once, or give up on it once.
+
+    tiktoken downloads the BPE vocabulary on first use.  On a network
+    restricted box - which the deployment target is - that download fails
+    slowly, with retries.  Resolving per call would pay that cost for every
+    sentence of every document, so a failure is cached as firmly as a
+    success and the fallback is used from then on.
+    """
+    global _ENCODER, _ENCODER_RESOLVED
+    if not _ENCODER_RESOLVED:
+        try:
+            import tiktoken
+
+            _ENCODER = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _ENCODER = None
+        _ENCODER_RESOLVED = True
+    return _ENCODER
+
+
 def count_tokens(text: str) -> int:
     """
     Approximate token count.
@@ -143,13 +170,19 @@ def count_tokens(text: str) -> int:
     Uses tiktoken when available.  The fallback (~4 characters per token)
     is deliberately conservative: over-estimating means slightly smaller
     chunks, which is harmless, whereas under-estimating overruns context.
-    """
-    try:
-        import tiktoken
 
-        return len(tiktoken.get_encoding("cl100k_base").encode(text))
-    except Exception:
+    Both paths agree on the boundary that callers depend on: empty text
+    costs nothing, and anything non-empty costs at least one token.  They
+    have to, because whether tiktoken can fetch its vocabulary is a property
+    of the network the box is on, not of the code, and chunk sizing must not
+    change underneath the same document.
+    """
+    if not text:
+        return 0
+    encoder = _encoder()
+    if encoder is None:
         return max(1, len(text) // 4)
+    return max(1, len(encoder.encode(text)))
 
 
 @dataclass
