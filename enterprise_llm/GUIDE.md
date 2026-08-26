@@ -816,29 +816,25 @@ remembering, or change how the platform is used. Newest at the top.
 **Watch out for:**
 -->
 
-### 2026-08-25 — SECURITY: rotate the NAMIS application-role password
+### 2026-08-25 — Note on the credential in the handoff notes
 
-**Who:** noted while reading the NAMIS handoff notes
-**Status:** ACTION REQUIRED — not a platform change.
+**Who:** noted while reading the NAMIS handoff notes, then corrected
+**Status:** no action — confirmed by the owner as an inactive placeholder.
 
-The generator's `HANDOFF.md` contains the **live application-role credential
-in plaintext** (`MaintSystemUser` / the password beside it). The document
-itself says to rotate it, and security finding F-1 says the same, but it is
-worth stating plainly: that password now exists in the legacy client
-binaries, in the handoff document, and in wherever that document has been
-copied or emailed.
+The generator's `HANDOFF.md` shows an application-role name and password in
+plaintext. It reads like a live secret; it is not — it is a placeholder and
+the account is inactive. Recorded here only so the next person to read that
+document does not raise it again.
 
-**Do:**
-1. Rotate the `MaintSystemUser` role password on `NAMISNNSS`.
-2. Scrub it from `HANDOFF.md` and any copy of it. Replace with a pointer to
-   the secret store.
-3. Audit `NAMISNNSS` for `sp_setapprole` calls from outside the expected
-   host set (F-1's remediation step 4).
+Two things remain true and separate from it:
 
-**This platform does not need it.** The reporting service uses its own
-read-only login; the application role is only a fallback for sites where
-that login cannot be granted SELECT. Nothing here should ever hold that
-credential.
+- **Finding F-1 is real.** The app-role credential compiled into the shipped
+  `NamisMaint` client binaries is recoverable with `strings`, and rotating it
+  is still on their security list.
+- **This platform never needs that credential.** The reporting service uses
+  its own read-only login. The application role is only a fallback for a site
+  where that login cannot be granted SELECT, and even then the secret stays
+  in a root-owned file on the server.
 
 ### 2026-08-25 — Handoff notes reconciled: three fixes
 
